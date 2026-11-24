@@ -1,10 +1,12 @@
 #include "canvas.h"
 #include "scope.h"
+#include "waveform.h"
 
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMouseEvent>
@@ -12,6 +14,7 @@
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
 #include <QTextOption>
+#include <QToolTip>
 #include <QVarLengthArray>
 #include <QWheelEvent>
 #ifdef FANTASYHOST_OPENGL
@@ -27,26 +30,28 @@
 
 namespace {
 constexpr qreal portTop = 58;
-constexpr qreal portSpacing = 25;
+constexpr qreal portSpacing = 18;
+constexpr qreal chartTop = 47;
 constexpr qreal minimumZoom = 0.000015;
 constexpr qreal cardRadius = 10;
 constexpr qreal scopeFooter = 56;
 
-qreal bodyTop(qsizetype inputs, qsizetype outputs)
+qreal lowestPort(qsizetype inputs, qsizetype outputs)
 {
-    return portTop + portSpacing * std::max(inputs, outputs) - 9;
+    return portTop + portSpacing * (std::max<qsizetype>(1, std::max(inputs, outputs)) - 1);
 }
 
 QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameters, QSizeF customSize = {})
 {
-    const qreal top = bodyTop(modulePorts(definition, parameters, false).size(), definition.outputs.size());
-    if (definition.scope && customSize.isValid()) {
-        const qreal extraPortHeight = top - bodyTop(1, 0);
-        return {customSize.width(), std::max(customSize.height(), Graph::minScopeHeight + extraPortHeight)};
+    if (definition.scope || definition.recordsWaveform) {
+        if (customSize.isValid())
+            return customSize;
+        return definition.recordsWaveform ? QSizeF(488, 317) : QSizeF(352, 248);
     }
+    const qreal last = lowestPort(modulePorts(definition, parameters, false).size(), definition.outputs.size());
     if (definition.displaysText)
-        return {336, top + 136};
-    return {definition.scope ? 352.0 : 234.0, top + (definition.scope ? 208.0 : 31.0)};
+        return {336, std::max<qreal>(157, last + 18)};
+    return {234, last + 47};
 }
 
 QColor portColor(DataType type, const ThemeColors &colors)
@@ -54,19 +59,6 @@ QColor portColor(DataType type, const ThemeColors &colors)
     if (type == DataType::Any)
         return colors.accent;
     return type == DataType::Number ? colors.number : colors.bytes;
-}
-
-QColor scopeChannelColor(int channel, const ThemeColors &colors)
-{
-    static const std::array<QColor, maxScopeChannels> light{
-        QColor("#177971"), QColor("#2855b5"), QColor("#a45012"), QColor("#a53771"),
-        QColor("#6c4aa6"), QColor("#587318"), QColor("#ad3d3d"), QColor("#266a85"),
-    };
-    static const std::array<QColor, maxScopeChannels> dark{
-        QColor("#75d6cb"), QColor("#a0bfff"), QColor("#f4b778"), QColor("#eea1ce"),
-        QColor("#c6a8f2"), QColor("#b4d77a"), QColor("#ffa2a2"), QColor("#89cde8"),
-    };
-    return (colors.canvas.lightness() < 128 ? dark : light).at(channel);
 }
 
 QPainterPath wirePath(QPointF from, QPointF to)
@@ -88,9 +80,11 @@ public:
     {
         if (definition.scope)
             capture = std::make_unique<ScopeCapture>();
+        if (definition.recordsWaveform)
+            recording = std::make_unique<WaveformRecording>();
         applySettings(node);
         setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
-        setToolTip(definition.scope ? definition.description + " 拖动右下角可调整大小。" : definition.description);
+        setToolTip(resizable() ? definition.description + " 拖动右下角可调整大小。" : definition.description);
         setPos(node.position);
     }
 
@@ -100,14 +94,13 @@ public:
 
     bool onResizeGrip(QPointF position) const
     {
-        return definition.scope && QRectF(card().bottomRight() - QPointF(25, 25), QSizeF(24, 24)).contains(position);
+        return resizable() && QRectF(card().bottomRight() - QPointF(25, 25), QSizeF(24, 24)).contains(position);
     }
 
     QSizeF fittedResize(QSizeF requested) const
     {
-        const qreal minHeight = Graph::minScopeHeight + plotTop() - bodyTop(1, 0);
         return {std::clamp(requested.width(), Graph::minScopeWidth, Graph::maxScopeSize),
-                std::clamp(requested.height(), minHeight, Graph::maxScopeSize)};
+                std::clamp(requested.height(), Graph::minScopeHeight, Graph::maxScopeSize)};
     }
 
     void setCardSize(QSizeF size)
@@ -115,6 +108,8 @@ public:
         if (dimensions != size) {
             prepareGeometryChange();
             dimensions = size;
+            if (recording)
+                refreshRecordingFrame();
             update();
         }
     }
@@ -170,18 +165,20 @@ public:
         painter->drawRoundedRect(frame, cardRadius, cardRadius);
 
         QFont font = painter->font();
-        font.setPixelSize(15);
+        font.setPixelSize(definition.displaysText ? 11 : 15);
         font.setWeight(QFont::DemiBold);
         painter->setFont(font);
-        painter->setPen(colors.text);
+        painter->setPen(definition.displaysText ? colors.muted : colors.text);
         painter->drawText(QRectF(15, 0, cardWidth - 38, 39), Qt::AlignLeft | Qt::AlignVCenter, definition.name);
         if (failed) {
             painter->setPen(Qt::NoPen);
             painter->setBrush(colors.error);
             painter->drawEllipse(QPointF(cardWidth - 17, 20), 3.5, 3.5);
         }
-        painter->setPen(colors.border);
-        painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
+        if (!definition.displaysText) {
+            painter->setPen(colors.border);
+            painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
+        }
 
         font.setPixelSize(12);
         font.setWeight(QFont::Normal);
@@ -191,27 +188,35 @@ public:
                 const QPointF position = portPosition(output, port.id);
                 painter->setPen(QPen(colors.canvas, 2));
                 painter->setBrush(portColor(port.type, colors));
-                painter->drawEllipse(position, 6, 6);
+                const qreal radius = definition.displaysText ? 4.5 : 5.5;
+                painter->drawEllipse(position, radius, radius);
+                if (definition.displaysText)
+                    continue;
                 painter->setPen(colors.muted);
-                const QRectF label(output ? cardWidth / 2 : 13, position.y() - 10, cardWidth / 2 - 13, 20);
+                const qreal labelWidth = (capture || recording) && !output ? chartLeft() - 16 : cardWidth / 2 - 13;
+                const QRectF label(output ? cardWidth / 2 : 12, position.y() - 9, labelWidth, 18);
                 painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft),
                                   painter->fontMetrics().elidedText(port.label, Qt::ElideRight, label.width()));
             }
         }
 
-        if (capture) {
+        if (capture)
             paintPlot(*painter);
+        else if (recording)
+            paintWaveform(*painter, recordingChart(), recordingFrame, colors);
+        else if (definition.displaysText)
+            paintText(*painter);
+        else {
+            painter->setPen(failed ? colors.error : colors.muted);
+            const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
+            painter->drawText(QRectF(14, lowestPort(inputPorts.size(), definition.outputs.size()) + 16, cardWidth - 28, 22),
+                              Qt::AlignLeft | Qt::AlignVCenter, painter->fontMetrics().elidedText(label, Qt::ElideRight, cardWidth - 28));
+        }
+        if (resizable()) {
             const QPointF corner = frame.bottomRight();
             painter->setPen(QPen(isSelected() ? colors.accent : colors.muted, 1.35, Qt::SolidLine, Qt::RoundCap));
             painter->drawLine(corner - QPointF(7, 15), corner - QPointF(15, 7));
             painter->drawLine(corner - QPointF(7, 10), corner - QPointF(10, 7));
-        } else if (definition.displaysText) {
-            paintText(*painter);
-        } else {
-            painter->setPen(failed ? colors.error : colors.muted);
-            const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
-            painter->drawText(QRectF(14, plotTop(), cardWidth - 28, 22), Qt::AlignLeft | Qt::AlignVCenter,
-                              painter->fontMetrics().elidedText(label, Qt::ElideRight, cardWidth - 28));
         }
     }
 
@@ -227,14 +232,21 @@ public:
             if (!paused)
                 shownScope = capture->frame();
         }
+        if (recording) {
+            recordingRate = node.parameters.value("sampleRate").toInt(1000);
+            configuredChannels = scopeChannels(node.parameters);
+            refreshRecordingFrame();
+        }
         update();
         return changed;
     }
 
-    void push(int channel, const QList<double> &values)
+    void push(int channel, const QList<double> &values, QString &error)
     {
         if (capture && !paused)
             capture->append(channel, values);
+        if (recording && !failed && !recording->append(channel, values, recordingRate, error))
+            failed = true;
     }
 
     bool isPaused() const { return paused; }
@@ -268,6 +280,8 @@ public:
         shownText = pendingText;
         if (capture && !paused)
             shownScope = capture->frame();
+        if (recording)
+            refreshRecordingFrame();
         update();
     }
 
@@ -275,6 +289,41 @@ public:
     const ModuleDefinition &definition;
     bool failed = false;
     std::function<void(QPointF)> moved;
+
+    qint64 recordingSamples() const { return recording ? recording->sampleCount() : 0; }
+
+    bool adjustRecording(QPointF position, WaveformGesture gesture, double steps)
+    {
+        if (!recording || !recordingChart().contains(position))
+            return false;
+        refreshRecordingBounds();
+        const QRectF plot = waveformPlotRect(recordingChart());
+        const QPointF anchor((position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height());
+        adjustWaveformView(recordingView, recordingLimits, gesture, steps, anchor);
+        refreshRecordingFrame();
+        update();
+        return true;
+    }
+
+    void fitRecording()
+    {
+        if (recording) {
+            recordingView = recordingLimits = recording->bounds();
+            refreshRecordingFrame();
+            update();
+        }
+    }
+
+    WaveformCsvSnapshot recordingCsv() const { return recording ? recording->csvSnapshot() : WaveformCsvSnapshot(); }
+
+    bool exportRecordingImage(const QString &path, QString &error) const
+    {
+        if (!recording) {
+            error = "未找到波形记录器。";
+            return false;
+        }
+        return saveWaveformImage(path, recordingChart().size(), *recording, recordingView, recordingChannels(), colors, error);
+    }
 
 protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override
@@ -292,18 +341,51 @@ protected:
     }
 
 private:
-    qreal plotTop() const { return bodyTop(inputPorts.size(), definition.outputs.size()); }
+    bool resizable() const { return definition.scope || definition.recordsWaveform; }
+
+    qreal chartLeft() const
+    {
+        return inputPorts.isEmpty() ? 13 : inputPorts.first().id == "ch1" && inputPorts.first().label != "CH1" ? 78 : 47;
+    }
+
+    QRectF recordingChart() const { return card().adjusted(chartLeft(), chartTop, -13, -18); }
+
+    int recordingChannels() const { return std::max(configuredChannels, recording->channelCount()); }
+
+    void refreshRecordingBounds()
+    {
+        const WaveformView next = recording->bounds();
+        const auto adjust = [](WaveformRange &view, WaveformRange previous, WaveformRange limit) {
+            if (view == previous || view.span() >= limit.span()) {
+                view = limit;
+            } else if (view.low < limit.low || view.high > limit.high) {
+                const double span = view.span();
+                view.low = std::clamp(view.low, limit.low, std::max(limit.low, limit.high - span));
+                view.high = std::min(limit.high, view.low + span);
+            }
+        };
+        adjust(recordingView.time, recordingLimits.time, next.time);
+        adjust(recordingView.value, recordingLimits.value, next.value);
+        recordingLimits = next;
+    }
+
+    void refreshRecordingFrame()
+    {
+        refreshRecordingBounds();
+        recordingFrame = waveformFrame(*recording, recordingView, recordingChannels(),
+                                       std::max(1, qRound(waveformPlotRect(recordingChart()).width())));
+    }
 
     void paintText(QPainter &painter) const
     {
-        const QRectF panel(13, plotTop(), dimensions.width() - 26, dimensions.height() - plotTop() - 13);
+        const QRectF content = card().adjusted(23, 37, -17, -12);
         painter.save();
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(colors.plot);
-        painter.drawRoundedRect(panel, 6, 6);
-        const QRectF content = panel.adjusted(10, 8, -10, -8);
         painter.setClipRect(content);
         painter.setPen(colors.text);
+        QFont font = painter.font();
+        font.setPixelSize(19);
+        font.setWeight(QFont::DemiBold);
+        painter.setFont(font);
         QTextOption options(Qt::AlignLeft | Qt::AlignTop);
         options.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         painter.drawText(content, shownText, options);
@@ -312,7 +394,7 @@ private:
 
     void paintPlot(QPainter &painter) const
     {
-        const QRectF plot(13, plotTop(), dimensions.width() - 26, dimensions.height() - plotTop() - scopeFooter);
+        const QRectF plot(chartLeft(), chartTop, dimensions.width() - chartLeft() - 13, dimensions.height() - chartTop - scopeFooter);
         const QRectF area = plot.adjusted(4, 4, -4, -4);
         painter.setPen(Qt::NoPen);
         painter.setBrush(colors.plot);
@@ -336,7 +418,7 @@ private:
         painter.setClipRect(area);
         painter.setBrush(Qt::NoBrush);
         if (shownScope.triggerPosition) {
-            painter.setPen(QPen(scopeChannelColor(shownScope.triggerChannel, colors), 0.8, Qt::DashLine));
+            painter.setPen(QPen(waveformChannelColor(shownScope.triggerChannel, colors), 0.8, Qt::DashLine));
             const qreal x = area.left() + area.width() * *shownScope.triggerPosition;
             painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
             const qreal y = area.bottom() - area.height() * ((shownScope.triggerLevel - shownScope.lower) / span);
@@ -355,7 +437,7 @@ private:
             trace.moveTo(position(points.first()));
             for (qsizetype i = 1; i < points.size(); ++i)
                 trace.lineTo(position(points.at(i)));
-            painter.setPen(QPen(scopeChannelColor(channel, colors), 1.45));
+            painter.setPen(QPen(waveformChannelColor(channel, colors), 1.45));
             painter.drawPath(trace);
             painter.drawEllipse(trace.currentPosition(), 1.5, 1.5);
         }
@@ -364,7 +446,7 @@ private:
         const qreal legendWidth = std::min<qreal>(40, plot.width() / std::max<qsizetype>(1, shownScope.traces.size()));
         for (qsizetype channel = 0; channel < shownScope.traces.size(); ++channel) {
             const qreal x = plot.left() + channel * legendWidth;
-            painter.setPen(scopeChannelColor(channel, colors));
+            painter.setPen(waveformChannelColor(channel, colors));
             painter.drawText(QRectF(x, plot.bottom() + 6, legendWidth, 16), Qt::AlignLeft | Qt::AlignVCenter,
                              QString("CH%1").arg(channel + 1));
         }
@@ -381,6 +463,12 @@ private:
     QList<PortDefinition> inputPorts;
     QSizeF dimensions;
     std::unique_ptr<ScopeCapture> capture;
+    std::unique_ptr<WaveformRecording> recording;
+    WaveformView recordingView;
+    WaveformView recordingLimits;
+    WaveformFrame recordingFrame;
+    int recordingRate = 1000;
+    int configuredChannels = 1;
     QString pendingStatus;
     QString shownStatus;
     QString pendingText;
@@ -697,8 +785,11 @@ QString Canvas::nodeDisplayText(const QUuid &id) const
 void Canvas::sample(const QUuid &id, int channel, const QList<double> &values)
 {
     if (NodeItem *item = nodes.value(id); item && !item->isPaused()) {
-        item->push(channel, values);
+        QString error;
+        item->push(channel, values, error);
         scheduleRepaint(id);
+        if (!error.isEmpty())
+            Q_EMIT message(QString("波形暂存失败：%1").arg(error));
     }
 }
 
@@ -730,6 +821,32 @@ void Canvas::rearmScope(const QUuid &id)
         item->rearm();
 }
 
+qint64 Canvas::recordingSampleCount(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item ? item->recordingSamples() : 0;
+}
+
+void Canvas::fitRecording(const QUuid &id)
+{
+    if (NodeItem *item = nodes.value(id))
+        item->fitRecording();
+}
+
+WaveformCsvSnapshot Canvas::recordingCsv(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item ? item->recordingCsv() : WaveformCsvSnapshot();
+}
+
+bool Canvas::exportRecordingImage(const QUuid &id, const QString &path, QString &error) const
+{
+    if (const NodeItem *item = nodes.value(id))
+        return item->exportRecordingImage(path, error);
+    error = "未找到波形记录器。";
+    return false;
+}
+
 void Canvas::scheduleRepaint(const QUuid &id)
 {
     dirtyNodes.insert(id);
@@ -744,6 +861,8 @@ void Canvas::flushSamples()
             item->presentValues();
             if (item->definition.displaysText)
                 Q_EMIT displayTextPresented(id, item->displayText());
+            if (item->definition.recordsWaveform)
+                Q_EMIT recordingUpdated(id, item->recordingSamples());
         }
     }
     dirtyNodes.clear();
@@ -784,18 +903,53 @@ void Canvas::drawForeground(QPainter *painter, const QRectF &)
     painter->restore();
 }
 
+bool Canvas::viewportEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        auto *help = static_cast<QHelpEvent *>(event);
+        if (const auto hit = portAt(help->pos())) {
+            if (const NodeItem *item = nodes.value(hit->endpoint.node)) {
+                if (const auto *port = item->port(hit->output, hit->endpoint.port)) {
+                    QToolTip::showText(help->globalPos(), port->label, viewport());
+                    return true;
+                }
+            }
+        }
+    }
+    return QGraphicsView::viewportEvent(event);
+}
+
 void Canvas::wheelEvent(QWheelEvent *event)
 {
     if (!resizingNode.isNull()) {
         event->accept();
         return;
     }
-    const qreal steps = event->angleDelta().y() != 0 ? event->angleDelta().y() / 120.0 : event->pixelDelta().y() / 90.0;
+    const QPoint cursor = event->position().toPoint();
+    const QPoint angle = event->angleDelta();
+    const QPoint pixel = event->pixelDelta();
+    const qreal vertical = angle.y() ? angle.y() / 120.0 : pixel.y() / 90.0;
+    const qreal horizontal = angle.x() ? angle.x() / 120.0 : pixel.x() / 90.0;
+    if (!wireStart && panButton == Qt::NoButton) {
+        if (auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(cursor))) {
+            const bool horizontalWheel = horizontal != 0 && std::abs(horizontal) >= std::abs(vertical);
+            const double delta = horizontalWheel ? horizontal : vertical;
+            const auto modifiers = event->modifiers();
+            const auto gesture = modifiers.testFlag(Qt::AltModifier) ? WaveformGesture::ZoomTime
+                : horizontalWheel ? WaveformGesture::PanTime
+                : modifiers.testFlag(Qt::ControlModifier) ? WaveformGesture::PanValue
+                : modifiers.testFlag(Qt::ShiftModifier) ? WaveformGesture::PanTime : WaveformGesture::ZoomValue;
+            if (delta != 0 && node->adjustRecording(node->mapFromScene(mapToScene(cursor)), gesture, delta)) {
+                event->accept();
+                return;
+            }
+        }
+    }
+    const qreal steps = vertical;
     if (steps == 0) {
         event->ignore();
         return;
     }
-    const QPoint cursor = event->position().toPoint();
     const QPointF anchor = mapToScene(cursor);
     const qreal current = transform().m11();
     const qreal next = std::clamp(current * std::pow(1.16, steps), minimumZoom, 2.6);

@@ -293,6 +293,17 @@ ParameterDefinition number(const QString &id, const QString &label, double initi
     return {id, label, ParameterKind::Number, initial, min, max, places, live, affectsPorts, {}};
 }
 
+QList<ParameterDefinition> waveformInputParameters()
+{
+    return {
+        number("channels", "通道数", 1, 1, maxScopeChannels, 0, false, true),
+        choice("layout", "输入布局", "ports", {{"ports", "逐通道接线"}, {"frame", "单线多通道帧"}}, false, true),
+        choice("encoding", "样本格式", "text", {{"text", "按行文本数值"}, {"u8", "UInt8"}, {"i16le", "Int16 LE"},
+                                              {"u16le", "UInt16 LE"}, {"f32le", "Float32 LE"}}),
+        number("sampleRate", "采样率 (Hz)", 1000, 1, 1000000, 0, true),
+    };
+}
+
 template<typename T>
 std::unique_ptr<Module> create(ModuleCallbacks io)
 {
@@ -325,12 +336,7 @@ const QList<ModuleDefinition> &moduleDefinitions()
             choice("rxFormat", "接收预览格式", "text", serialFormats, true),
             choice("lineEnding", "发送追加", "none", {{"none", "无"}, {"lf", "LF"}, {"crlf", "CRLF"}, {"cr", "CR"}}, true),
         }, &create<SerialTransceiver>, nullptr, false, true},
-        {"scope", "示波器", "从串口字节流解码样本，并实时显示多通道波形。", {}, {}, {
-            number("channels", "通道数", 1, 1, maxScopeChannels, 0, false, true),
-            choice("layout", "输入布局", "ports", {{"ports", "逐通道接线"}, {"frame", "单线多通道帧"}}, false, true),
-            choice("encoding", "样本格式", "text", {{"text", "按行文本数值"}, {"u8", "UInt8"}, {"i16le", "Int16 LE"},
-                                                  {"u16le", "UInt16 LE"}, {"f32le", "Float32 LE"}}),
-            number("sampleRate", "采样率 (Hz)", 1000, 1, 1000000, 0, true),
+        {"scope", "示波器", "从串口字节流解码样本，并实时显示多通道波形。", {}, {}, waveformInputParameters() + QList<ParameterDefinition>{
             number("timeBase", "时基 (ms/格)", 10, 0.001, 10000, 3, true),
             choice("verticalMode", "垂直范围", "auto", {{"auto", "自动缩放"}, {"manual", "手动"}}, true),
             number("voltsPerDivision", "垂直刻度 (单位/格)", 1, 0.000001, 1000000000000.0, 6, true),
@@ -340,6 +346,8 @@ const QList<ModuleDefinition> &moduleDefinitions()
             choice("triggerEdge", "触发边沿", "rising", {{"rising", "上升沿"}, {"falling", "下降沿"}}, true),
             number("triggerLevel", "触发电平", 0, -1000000000000.0, 1000000000000.0, 6, true),
         }, &create<ScopeInput>, &scopeInputs, true},
+        {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters(),
+         &create<ScopeInput>, &scopeInputs, false, false, false, true},
         textDisplayDefinition(),
     };
     return definitions;

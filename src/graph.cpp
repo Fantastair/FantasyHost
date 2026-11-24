@@ -70,7 +70,10 @@ void Graph::moveNode(const QUuid &id, QPointF position)
 bool Graph::resizeNode(const QUuid &id, QSizeF size)
 {
     const auto found = nodes_.find(id);
-    if (found == nodes_.end() || !moduleDefinition(found->type)->scope || !validScopeSize(size) || found->customSize == size)
+    if (found == nodes_.end() || !validScopeSize(size) || found->customSize == size)
+        return false;
+    const auto *definition = moduleDefinition(found->type);
+    if (!definition->scope && !definition->recordsWaveform)
         return false;
     found->customSize = size;
     return true;
@@ -268,7 +271,7 @@ bool Graph::load(const QString &path, Graph &graph, QString &error)
         if (!layoutSize.isUndefined()) {
             const QJsonObject dimensions = layoutSize.toObject();
             size = {dimensions.value("width").toDouble(), dimensions.value("height").toDouble()};
-            if (!definition->scope || !validScopeSize(size)) {
+            if ((!definition->scope && !definition->recordsWaveform) || !validScopeSize(size)) {
                 error = QString("模块 %1 的画布尺寸无效。").arg(definition->name);
                 return false;
             }

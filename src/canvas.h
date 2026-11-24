@@ -11,6 +11,7 @@
 
 class NodeItem;
 class EdgeItem;
+class WaveformCsvSnapshot;
 
 class Canvas : public QGraphicsView {
     Q_OBJECT
@@ -33,6 +34,10 @@ public:
     bool scopePaused(const QUuid &id) const;
     void setScopePaused(const QUuid &id, bool paused);
     void rearmScope(const QUuid &id);
+    qint64 recordingSampleCount(const QUuid &id) const;
+    void fitRecording(const QUuid &id);
+    WaveformCsvSnapshot recordingCsv(const QUuid &id) const;
+    bool exportRecordingImage(const QUuid &id, const QString &path, QString &error) const;
     void setTheme(const ThemeColors &theme);
 #ifdef FANTASYHOST_OPENGL
     void setOpenGLViewport(bool enabled);
@@ -45,11 +50,13 @@ Q_SIGNALS:
     void message(const QString &text);
     void zoomChanged(double percent);
     void displayTextPresented(const QUuid &id, const QString &text);
+    void recordingUpdated(const QUuid &id, qint64 samples);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);
 #endif
 
 protected:
+    bool viewportEvent(QEvent *event) override;
     void drawBackground(QPainter *painter, const QRectF &bounds) override;
     void drawForeground(QPainter *painter, const QRectF &) override;
     void wheelEvent(QWheelEvent *event) override;

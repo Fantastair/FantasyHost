@@ -26,8 +26,8 @@ struct ThemeColors {
 };
 
 enum class WorkspaceIcon {
-    New, Open, Save, Fit, Float, Close,
-    Serial, Waveform, Text,
+    New, Open, Save, Fit, Float, Close, Minimize, Maximize, Restore,
+    Serial, Waveform, Recorder, Text,
 };
 
 const ThemeColors &themeColors(bool dark);

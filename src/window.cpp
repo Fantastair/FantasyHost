@@ -2,6 +2,7 @@
 
 #include "canvas.h"
 #include "scope.h"
+#include "waveform.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -9,6 +10,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDockWidget>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -22,6 +24,7 @@
 #include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -34,15 +37,29 @@
 #include <QStyleHints>
 #include <QToolBar>
 #include <QToolButton>
+#include <QThread>
 #include <QVBoxLayout>
+#include <QWindow>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <windowsx.h>
+#endif
 
 namespace {
 const QString projectFilter = "FantasyHost 工程 (*.fhgraph)";
 const QString appearanceSetting = "view/appearance";
 constexpr qsizetype serialPreviewLimit = 16 * 1024;
 const QMap<QString, WorkspaceIcon> moduleIcons{
-    {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform}, {"text", WorkspaceIcon::Text},
+    {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform},
+    {"recorder", WorkspaceIcon::Recorder}, {"text", WorkspaceIcon::Text},
 };
+
+void showNodeStatus(QLabel &label, const QString &status)
+{
+    label.setText(status);
+    if (label.objectName() == "recorderStatus")
+        label.setVisible(!status.isEmpty() && status != "等待输入" && status != "正在采集");
+}
 
 QLabel *wrappedLabel(const QString &text, QWidget *parent)
 {
@@ -107,6 +124,32 @@ private:
     QToolButton *const minus;
     QToolButton *const plus;
 };
+
+class WindowHeader final : public QWidget {
+public:
+    explicit WindowHeader(QWidget *parent) : QWidget(parent) {}
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton && window()->windowHandle() && window()->windowHandle()->startSystemMove()) {
+            event->accept();
+            return;
+        }
+        QWidget::mousePressEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            if (window()->isMaximized()) window()->showNormal();
+            else window()->showMaximized();
+            event->accept();
+        } else {
+            QWidget::mouseDoubleClickEvent(event);
+        }
+    }
+};
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -162,7 +205,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&runner, &GraphRunner::statusChanged, canvas, &Canvas::setNodeStatus);
     connect(&runner, &GraphRunner::statusChanged, this, [this](const QUuid &id, const QString &status) {
         if (nodeStatus && id == inspectedNode)
-            nodeStatus->setText(status);
+            showNodeStatus(*nodeStatus, status);
     });
     connect(&runner, &GraphRunner::failed, this, &MainWindow::showFailure);
     connect(QApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this] {
@@ -186,8 +229,10 @@ MainWindow::~MainWindow()
 
 void MainWindow::createActions()
 {
-    menuBar()->setObjectName("workspaceMenu");
-    auto *file = menuBar()->addMenu("工程(&F)");
+    const bool integrated = QGuiApplication::platformName() == "windows";
+    QMenuBar *menu = integrated ? new QMenuBar(this) : menuBar();
+    menu->setObjectName("workspaceMenu");
+    auto *file = menu->addMenu("工程(&F)");
     QAction *newAction = file->addAction("新建工程", this, [this] {
         if (confirmReplace())
             setProject({});
@@ -201,7 +246,7 @@ void MainWindow::createActions()
     file->addSeparator();
     file->addAction("退出", this, &QWidget::close)->setShortcut(QKeySequence::Quit);
 
-    auto *view = menuBar()->addMenu("视图(&V)");
+    auto *view = menu->addMenu("视图(&V)");
     QAction *fit = view->addAction("适配画布", canvas, &Canvas::fitGraph);
     fit->setShortcut(Qt::Key_Home);
     auto *appearanceMenu = view->addMenu("外观");
@@ -236,10 +281,10 @@ void MainWindow::createActions()
     for (QDockWidget *dock : findChildren<QDockWidget *>())
         view->addAction(dock->toggleViewAction());
 
-    QToolBar *bar = addToolBar("工程工具栏");
+    QToolBar *bar = integrated ? new QToolBar("工程工具栏", this) : addToolBar("工程工具栏");
     bar->setObjectName("projectToolbar");
     bar->setMovable(false);
-    bar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    bar->setToolButtonStyle(integrated ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextBesideIcon);
     bar->setIconSize(QSize(18, 18));
     actionIcons = {{newAction, WorkspaceIcon::New}, {openAction, WorkspaceIcon::Open},
                    {saveAction, WorkspaceIcon::Save}, {fit, WorkspaceIcon::Fit}};
@@ -249,7 +294,130 @@ void MainWindow::createActions()
     bar->addActions({newAction, openAction, saveAction});
     bar->addSeparator();
     bar->addAction(fit);
+    if (integrated)
+        createWindowHeader(menu, bar);
 }
+
+void MainWindow::createWindowHeader(QMenuBar *menu, QToolBar *toolbar)
+{
+    setWindowFlag(Qt::FramelessWindowHint);
+    auto *header = new WindowHeader(this);
+    header->setObjectName("workspaceHeader");
+    header->setAttribute(Qt::WA_StyledBackground);
+    header->setFixedHeight(44);
+    auto *layout = new QHBoxLayout(header);
+    layout->setContentsMargins(7, 4, 5, 3);
+    layout->setSpacing(4);
+    menu->setNativeMenuBar(false);
+    layout->addWidget(menu);
+    layout->addWidget(toolbar);
+
+    workspaceTitle = new QLabel(header);
+    workspaceTitle->setTextFormat(Qt::PlainText);
+    workspaceTitle->setObjectName("workspaceTitle");
+    workspaceTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    workspaceTitle->setAlignment(Qt::AlignCenter);
+    workspaceTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+    layout->addWidget(workspaceTitle, 1);
+
+    const auto button = [header, layout](const QString &name, const QString &label) {
+        auto *control = new QToolButton(header);
+        control->setObjectName(name);
+        control->setToolTip(label);
+        control->setAccessibleName(label);
+        control->setIconSize(QSize(16, 16));
+        control->setFixedSize(38, 32);
+        control->setFocusPolicy(Qt::TabFocus);
+        layout->addWidget(control);
+        return control;
+    };
+    auto *minimize = button("windowMinimize", "最小化");
+    maximizeButton = button("windowMaximize", "最大化");
+    auto *close = button("windowClose", "关闭窗口");
+    dockIcons.append({minimize, WorkspaceIcon::Minimize});
+    dockIcons.append({close, WorkspaceIcon::Close});
+    connect(minimize, &QToolButton::clicked, this, &QWidget::showMinimized);
+    connect(maximizeButton, &QToolButton::clicked, this, [this] { isMaximized() ? showNormal() : showMaximized(); });
+    connect(close, &QToolButton::clicked, this, &QWidget::close);
+    setMenuWidget(header);
+}
+
+void MainWindow::updateWindowControl()
+{
+    if (maximizeButton) {
+        const bool maximized = isMaximized();
+        const QColor color = themeColors(darkAppearance.value_or(false)).muted;
+        maximizeButton->setIcon(workspaceIcon(maximized ? WorkspaceIcon::Restore : WorkspaceIcon::Maximize, color));
+        maximizeButton->setToolTip(maximized ? "还原窗口" : "最大化");
+        maximizeButton->setAccessibleName(maximizeButton->toolTip());
+    }
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange)
+        updateWindowControl();
+}
+
+#ifdef Q_OS_WIN
+bool MainWindow::event(QEvent *event)
+{
+    const bool handled = QMainWindow::event(event);
+    if (event->type() == QEvent::WinIdChange && maximizeButton && internalWinId()) {
+        QTimer::singleShot(0, this, [this] {
+            const auto hwnd = reinterpret_cast<HWND>(internalWinId());
+            if (!hwnd)
+                return;
+            const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            if (!(style & WS_THICKFRAME)) {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_THICKFRAME);
+                SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        });
+    }
+    return handled;
+}
+
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+    const auto *event = static_cast<MSG *>(message);
+    if (maximizeButton && event->message == WM_NCCALCSIZE) {
+        *result = 0;
+        return true;
+    }
+    if (maximizeButton && event->message == WM_NCHITTEST && !isFullScreen()) {
+        POINT point{GET_X_LPARAM(event->lParam), GET_Y_LPARAM(event->lParam)};
+        RECT client{};
+        if (ScreenToClient(event->hwnd, &point) && GetClientRect(event->hwnd, &client)) {
+            const qreal scale = devicePixelRatioF();
+            if (!isMaximized()) {
+                const int grip = qRound(6 * scale);
+                const bool left = point.x < grip;
+                const bool right = point.x >= client.right - grip;
+                if (point.y < grip) {
+                    *result = left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP;
+                    return true;
+                }
+                if (point.y >= client.bottom - grip) {
+                    *result = left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM;
+                    return true;
+                }
+                if (left || right) {
+                    *result = left ? HTLEFT : HTRIGHT;
+                    return true;
+                }
+            }
+            const QPoint position(qRound(point.x / scale), qRound(point.y / scale));
+            if (workspaceTitle && workspaceTitle->rect().contains(workspaceTitle->mapFrom(this, position))) {
+                *result = HTCAPTION;
+                return true;
+            }
+        }
+    }
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+#endif
 
 void MainWindow::applyAppearancePreference()
 {
@@ -278,6 +446,7 @@ void MainWindow::refreshAppearance()
         action->setIcon(workspaceIcon(symbol, colors.text));
     for (const auto &[button, symbol] : dockIcons)
         button->setIcon(workspaceIcon(symbol, colors.muted));
+    updateWindowControl();
     for (int row = 0; row < library->count(); ++row) {
         QListWidgetItem *item = library->item(row);
         const QString id = item->data(Qt::UserRole).toString();
@@ -412,10 +581,16 @@ void MainWindow::refreshInspector()
         const QString status = runner.status(id);
         nodeStatus = wrappedLabel(status.isEmpty() ? QString("等待输入") : status, pane);
         nodeStatus->setAccessibleName("模块状态");
+        if (definition.recordsWaveform) {
+            nodeStatus->setObjectName("recorderStatus");
+            showNodeStatus(*nodeStatus, status);
+        }
         inspectorLayout->addWidget(nodeStatus);
     }
     if (definition.scope)
         createScopeControls(pane, id);
+    else if (definition.recordsWaveform)
+        createRecorderControls(pane, id);
     else if (definition.id == "serial")
         createSerialControls(pane, *node);
 
@@ -645,6 +820,93 @@ void MainWindow::createScopeControls(QWidget *pane, const QUuid &id)
     inspectorLayout->addWidget(section);
 }
 
+void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
+{
+    auto *section = new QWidget(pane);
+    auto *layout = new QVBoxLayout(section);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(7);
+    auto *samples = wrappedLabel({}, section);
+    samples->setObjectName("recordedSamples");
+    layout->addWidget(samples);
+    auto *fit = new QPushButton("显示全部数据", section);
+    fit->setObjectName("fitRecording");
+    connect(fit, &QPushButton::clicked, canvas, [this, id] { canvas->fitRecording(id); });
+    layout->addWidget(fit);
+
+    auto *actions = new QHBoxLayout;
+    auto *csv = new QPushButton("导出 CSV", section);
+    auto *png = new QPushButton("导出当前视图", section);
+    csv->setObjectName("exportRecordingCsv");
+    png->setObjectName("exportRecordingPng");
+    png->setToolTip("将当前视图保存为高分辨率 PNG");
+    connect(csv, &QPushButton::clicked, this, [this, id] { exportRecording(id, false); });
+    connect(png, &QPushButton::clicked, this, [this, id] { exportRecording(id, true); });
+    actions->addWidget(csv);
+    actions->addWidget(png);
+    layout->addLayout(actions);
+    layout->addWidget(wrappedLabel("滚轮缩放纵轴，Ctrl 平移纵轴。横向滚轮或 Shift 平移时间轴，Alt 缩放时间轴。", section));
+
+    const auto update = [samples, fit, csv, png](qint64 count) {
+        samples->setText(QString("已记录 %1 个样本").arg(QLocale().toString(count)));
+        fit->setEnabled(count > 0);
+        csv->setEnabled(count > 0);
+        png->setEnabled(count > 0);
+    };
+    update(canvas->recordingSampleCount(id));
+    connect(canvas, &Canvas::recordingUpdated, section, [id, update](const QUuid &node, qint64 count) {
+        if (id == node)
+            update(count);
+    });
+    inspectorLayout->addWidget(section);
+}
+
+void MainWindow::exportRecording(const QUuid &id, bool image)
+{
+    QFileDialog dialog(this, image ? "导出当前波形视图" : "导出全部波形数据", {},
+                       image ? "PNG 图像 (*.png)" : "CSV 文件 (*.csv)");
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setDefaultSuffix(image ? "png" : "csv");
+    dialog.selectFile(image ? "waveform.png" : "waveform.csv");
+    if (!dialog.exec())
+        return;
+    const QString path = dialog.selectedFiles().first();
+    QString destination = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+#ifdef Q_OS_WIN
+    destination = destination.toCaseFolded();
+#endif
+    if (activeCsvDestinations.contains(destination)) {
+        statusBar()->showMessage("此文件正在导出，请选择其他文件。", 4500);
+        return;
+    }
+    if (!image) {
+        struct ExportResult { bool success = false; QString error; };
+        const auto result = std::make_shared<ExportResult>();
+        auto *worker = QThread::create([snapshot = canvas->recordingCsv(id), path, result] {
+            result->success = snapshot.save(path, result->error);
+        });
+        activeCsvDestinations.insert(destination);
+        worker->setParent(this);
+        connect(worker, &QThread::finished, this, [this, result, destination] {
+            activeCsvDestinations.remove(destination);
+            if (result->success)
+                statusBar()->showMessage("全部采样数据已导出", 4500);
+            else
+                QMessageBox::warning(this, "无法导出波形", result->error);
+        });
+        connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+        statusBar()->showMessage("正在导出波形数据…");
+        return;
+    }
+    QString error;
+    if (!canvas->exportRecordingImage(id, path, error)) {
+        QMessageBox::warning(this, "无法导出波形", error);
+        return;
+    }
+    statusBar()->showMessage("当前波形视图已导出", 4500);
+}
+
 void MainWindow::refreshSerialPreview()
 {
     const Node *node = graph.node(inspectedNode);
@@ -805,6 +1067,8 @@ void MainWindow::updateTitle()
     const QString name = projectPath.isEmpty() ? QString("未命名工程") : QFileInfo(projectPath).completeBaseName();
     setWindowTitle(QString("%1[*]  |  FantasyHost").arg(name));
     setWindowModified(modified);
+    if (workspaceTitle)
+        workspaceTitle->setText(name + (modified ? " *" : "") + "  ·  FantasyHost");
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

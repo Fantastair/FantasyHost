@@ -15,6 +15,7 @@ qt_add_executable(FantasyHost WIN32 MACOSX_BUNDLE
     src/textdisplay.cpp src/textdisplay.h
     src/runner.cpp src/runner.h
     src/scope.cpp src/scope.h
+    src/waveform.cpp src/waveform.h
     src/theme.cpp src/theme.h
     src/canvas.cpp src/canvas.h
     src/window.cpp src/window.h

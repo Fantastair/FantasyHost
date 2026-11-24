@@ -6,6 +6,7 @@
 
 #include <QMainWindow>
 #include <QHash>
+#include <QSet>
 #include <QTimer>
 #include <optional>
 #include <utility>
@@ -19,6 +20,8 @@ class QPlainTextEdit;
 class QPushButton;
 class QToolButton;
 class QVBoxLayout;
+class QMenuBar;
+class QToolBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -30,11 +33,18 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
+#ifdef Q_OS_WIN
+    bool event(QEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
+#endif
 
 private:
     enum class Appearance { System, Light, Dark };
 
     void createActions();
+    void createWindowHeader(QMenuBar *menu, QToolBar *toolbar);
+    void updateWindowControl();
     void createDockPanels();
     void createDockHeader(QDockWidget *dock);
     void applyAppearancePreference();
@@ -42,6 +52,8 @@ private:
     void refreshInspector();
     void createSerialControls(QWidget *pane, const Node &node);
     void createScopeControls(QWidget *pane, const QUuid &id);
+    void createRecorderControls(QWidget *pane, const QUuid &id);
+    void exportRecording(const QUuid &id, bool image);
     QWidget *createTextTemplateEditor(QWidget *parent, const Node &node, const ParameterDefinition &parameter);
     void refreshSerialPreview();
     void commitInspectorEdits();
@@ -63,12 +75,15 @@ private:
     QVBoxLayout *inspectorLayout = nullptr;
     QLabel *nodeStatus = nullptr;
     QLabel *zoomStatus = nullptr;
+    QLabel *workspaceTitle = nullptr;
+    QToolButton *maximizeButton = nullptr;
     QPlainTextEdit *serialPreview = nullptr;
     QPlainTextEdit *serialInput = nullptr;
     QPlainTextEdit *textDisplayPreview = nullptr;
     QHash<QUuid, QByteArray> serialHistory;
     QHash<QUuid, QString> serialDrafts;
     QHash<QUuid, QString> textTemplateDrafts;
+    QSet<QString> activeCsvDestinations;
     QTimer serialPreviewTimer;
     QUuid inspectedNode;
     QString projectPath;

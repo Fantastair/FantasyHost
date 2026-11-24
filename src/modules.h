@@ -77,6 +77,7 @@ struct ModuleDefinition {
     bool scope = false;
     bool manualOpen = false;
     bool displaysText = false;
+    bool recordsWaveform = false;
 };
 
 const QList<ModuleDefinition> &moduleDefinitions();

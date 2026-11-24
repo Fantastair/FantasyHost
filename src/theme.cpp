@@ -57,7 +57,7 @@ QString workspaceStyle(const ThemeColors &colors)
 {
     QString style = QStringLiteral(R"(
         QMainWindow#workspaceWindow, QWidget#libraryPane, QWidget#inspectorPane,
-        QScrollArea#inspectorScroll, QWidget#dockHeader, QToolBar#projectToolbar, QStatusBar {
+        QScrollArea#inspectorScroll, QWidget#dockHeader, QWidget#workspaceHeader, QToolBar#projectToolbar, QStatusBar {
             background: @surface;
         }
         QMainWindow::separator { background: @border; width: 1px; height: 1px; }
@@ -66,6 +66,11 @@ QString workspaceStyle(const ThemeColors &colors)
         QMenuBar#workspaceMenu::item { background: transparent; border-radius: 5px; padding: 5px 9px; }
         QMenuBar#workspaceMenu::item:selected { background: @hover; }
         QMenuBar#workspaceMenu::item:pressed { background: @selection; }
+        QWidget#workspaceHeader { border-bottom: 1px solid @border; }
+        QWidget#workspaceHeader QMenuBar#workspaceMenu { padding: 0 2px; }
+        QWidget#workspaceHeader QToolBar#projectToolbar { border: 0; padding: 0 3px; spacing: 1px; }
+        QWidget#workspaceHeader QToolBar#projectToolbar QToolButton { padding: 4px; }
+        QLabel#workspaceTitle { color: @muted; }
         QMenu { background: @card; color: @text; border: 1px solid @border; padding: 4px; }
         QMenu::item { padding: 5px 23px 5px 24px; border-radius: 4px; }
         QMenu::item:selected { background: @hover; }
@@ -76,6 +81,12 @@ QString workspaceStyle(const ThemeColors &colors)
         QToolBar#projectToolbar QToolButton, QWidget#dockHeader QToolButton, QPushButton {
             background: transparent; color: @text; border: 1px solid transparent; border-radius: 6px;
         }
+        QToolButton#windowMinimize, QToolButton#windowMaximize, QToolButton#windowClose {
+            background: transparent; border: 1px solid transparent; border-radius: 5px;
+        }
+        QToolButton#windowMinimize:hover, QToolButton#windowMaximize:hover { background: @hover; }
+        QToolButton#windowClose:hover { background: @selection; border-color: @error; }
+        QToolButton#windowMinimize:focus, QToolButton#windowMaximize:focus, QToolButton#windowClose:focus { border-color: @accent; }
         QToolBar#projectToolbar QToolButton { padding: 5px 8px; min-height: 20px; }
         QWidget#dockHeader QToolButton { padding: 2px; }
         QToolBar#projectToolbar QToolButton:hover, QWidget#dockHeader QToolButton:hover, QPushButton:hover { background: @hover; }
@@ -90,7 +101,7 @@ QString workspaceStyle(const ThemeColors &colors)
             color: @disabled; background: @surface;
         }
         QLabel#dockTitle { color: @text; font-weight: 600; }
-        QLabel#secondaryLabel { color: @muted; }
+        QLabel#secondaryLabel, QLabel#recorderStatus { color: @muted; }
         QListWidget#moduleLibrary { background: transparent; border: 0; padding: 0; outline: 0; }
         QListWidget#moduleLibrary::item { color: @text; padding-left: 8px; border: 1px solid transparent; border-radius: 6px; }
         QListWidget#moduleLibrary::item:hover { background: @hover; }
@@ -170,6 +181,16 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
         p.drawLine(QPointF(5, 5), QPointF(13, 13));
         p.drawLine(QPointF(13, 5), QPointF(5, 13));
         break;
+    case WorkspaceIcon::Minimize:
+        p.drawLine(QPointF(4, 11), QPointF(14, 11));
+        break;
+    case WorkspaceIcon::Maximize:
+        p.drawRect(QRectF(4, 4, 10, 10));
+        break;
+    case WorkspaceIcon::Restore:
+        polyline({{7, 4}, {14, 4}, {14, 11}});
+        p.drawRect(QRectF(4, 7, 7, 7));
+        break;
     case WorkspaceIcon::Serial:
         p.drawRoundedRect(QRectF(3, 5, 12, 8), 2, 2);
         for (int x : {6, 9, 12})
@@ -178,6 +199,11 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
     case WorkspaceIcon::Waveform:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
         polyline({{4, 9}, {6, 9}, {8, 6}, {10, 12}, {12, 9}, {14, 9}});
+        break;
+    case WorkspaceIcon::Recorder:
+        p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
+        polyline({{4, 10}, {6, 10}, {8, 7}, {10, 11}, {12, 9}, {14, 9}});
+        p.drawPoint(QPointF(13, 6));
         break;
     case WorkspaceIcon::Text:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
