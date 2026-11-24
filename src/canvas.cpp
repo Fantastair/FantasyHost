@@ -1,0 +1,1001 @@
+#include "canvas.h"
+#include "scope.h"
+
+#include <QContextMenuEvent>
+#include <QCursor>
+#include <QGraphicsPathItem>
+#include <QGraphicsScene>
+#include <QKeyEvent>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QScrollBar>
+#include <QStyleOptionGraphicsItem>
+#include <QVarLengthArray>
+#include <QWheelEvent>
+#ifdef FANTASYHOST_OPENGL
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QOpenGLWidget>
+#include <QPointer>
+#endif
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <utility>
+
+namespace {
+constexpr qreal portTop = 58;
+constexpr qreal portSpacing = 25;
+constexpr qreal minimumZoom = 0.000015;
+constexpr qreal cardRadius = 10;
+constexpr qreal scopeFooter = 56;
+
+qreal bodyTop(qsizetype inputs, qsizetype outputs)
+{
+    return portTop + portSpacing * std::max(inputs, outputs) - 9;
+}
+
+QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameters, QSizeF customSize = {})
+{
+    const qreal top = bodyTop(modulePorts(definition, parameters, false).size(), definition.outputs.size());
+    if (definition.scope && customSize.isValid()) {
+        const qreal extraPortHeight = top - bodyTop(1, 0);
+        return {customSize.width(), std::max(customSize.height(), Graph::minScopeHeight + extraPortHeight)};
+    }
+    return {definition.scope ? 352.0 : 234.0, top + (definition.scope ? 208.0 : 31.0)};
+}
+
+QColor portColor(DataType type, const ThemeColors &colors)
+{
+    return type == DataType::Number ? colors.number : colors.bytes;
+}
+
+QColor scopeChannelColor(int channel, const ThemeColors &colors)
+{
+    static const std::array<QColor, maxScopeChannels> light{
+        QColor("#177971"), QColor("#2855b5"), QColor("#a45012"), QColor("#a53771"),
+        QColor("#6c4aa6"), QColor("#587318"), QColor("#ad3d3d"), QColor("#266a85"),
+    };
+    static const std::array<QColor, maxScopeChannels> dark{
+        QColor("#75d6cb"), QColor("#a0bfff"), QColor("#f4b778"), QColor("#eea1ce"),
+        QColor("#c6a8f2"), QColor("#b4d77a"), QColor("#ffa2a2"), QColor("#89cde8"),
+    };
+    return (colors.canvas.lightness() < 128 ? dark : light).at(channel);
+}
+
+QPainterPath wirePath(QPointF from, QPointF to)
+{
+    const qreal dx = to.x() - from.x();
+    const qreal distance = std::clamp(std::abs(dx) * 0.5, dx >= 0 ? 12.0 : 42.0, 220.0);
+    QPainterPath path(from);
+    path.cubicTo(from + QPointF(distance, 0), to - QPointF(distance, 0), to);
+    return path;
+}
+}
+
+class NodeItem final : public QGraphicsItem {
+public:
+    static constexpr int Type = UserType + 1;
+
+    NodeItem(const Node &node, const ThemeColors &colors)
+        : id(node.id), definition(*moduleDefinition(node.type)), colors(colors)
+    {
+        if (definition.scope)
+            capture = std::make_unique<ScopeCapture>();
+        applySettings(node);
+        setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
+        setToolTip(definition.scope ? definition.description + " 拖动右下角可调整大小。" : definition.description);
+        setPos(node.position);
+    }
+
+    int type() const override { return Type; }
+    QRectF card() const { return {{0, 0}, dimensions}; }
+    QRectF boundingRect() const override { return card().adjusted(-12, -5, 12, 7); }
+
+    bool onResizeGrip(QPointF position) const
+    {
+        return definition.scope && QRectF(card().bottomRight() - QPointF(25, 25), QSizeF(24, 24)).contains(position);
+    }
+
+    QSizeF fittedResize(QSizeF requested) const
+    {
+        const qreal minHeight = Graph::minScopeHeight + plotTop() - bodyTop(1, 0);
+        return {std::clamp(requested.width(), Graph::minScopeWidth, Graph::maxScopeSize),
+                std::clamp(requested.height(), minHeight, Graph::maxScopeSize)};
+    }
+
+    void setCardSize(QSizeF size)
+    {
+        if (dimensions != size) {
+            prepareGeometryChange();
+            dimensions = size;
+            update();
+        }
+    }
+
+    QPainterPath shape() const override
+    {
+        QPainterPath path;
+        path.addRoundedRect(card(), cardRadius, cardRadius);
+        for (bool output : {false, true}) {
+            for (const PortDefinition &port : ports(output))
+                path.addEllipse(portPosition(output, port.id), 9, 9);
+        }
+        path.setFillRule(Qt::WindingFill);
+        return path;
+    }
+
+    const QList<PortDefinition> &ports(bool output) const { return output ? definition.outputs : inputPorts; }
+
+    const PortDefinition *port(bool output, const QString &id) const
+    {
+        for (const auto &candidate : ports(output)) {
+            if (candidate.id == id)
+                return &candidate;
+        }
+        return nullptr;
+    }
+
+    QPointF portPosition(bool output, const QString &id) const
+    {
+        const auto &list = ports(output);
+        for (qsizetype index = 0; index < list.size(); ++index) {
+            if (list.at(index).id == id)
+                return {output ? dimensions.width() : 0, portTop + portSpacing * index};
+        }
+        return {};
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override
+    {
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRectF frame = card();
+        const qreal cardWidth = dimensions.width();
+        const qreal zoom = QStyleOptionGraphicsItem::levelOfDetailFromTransform(painter->worldTransform());
+        if (zoom < 0.12) {
+            painter->fillRect(frame, failed ? colors.error : isSelected() ? colors.accent : colors.muted);
+            return;
+        }
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(colors.shadow);
+        painter->drawRoundedRect(frame.translated(0, 3), cardRadius, cardRadius);
+        painter->setBrush(colors.card);
+        painter->setPen(QPen(failed ? colors.error : isSelected() ? colors.accent : colors.border, isSelected() ? 2 : 1));
+        painter->drawRoundedRect(frame, cardRadius, cardRadius);
+
+        QFont font = painter->font();
+        font.setPixelSize(15);
+        font.setWeight(QFont::DemiBold);
+        painter->setFont(font);
+        painter->setPen(colors.text);
+        painter->drawText(QRectF(15, 0, cardWidth - 38, 39), Qt::AlignLeft | Qt::AlignVCenter, definition.name);
+        if (failed) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(colors.error);
+            painter->drawEllipse(QPointF(cardWidth - 17, 20), 3.5, 3.5);
+        }
+        painter->setPen(colors.border);
+        painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
+
+        font.setPixelSize(12);
+        font.setWeight(QFont::Normal);
+        painter->setFont(font);
+        for (bool output : {false, true}) {
+            for (const PortDefinition &port : ports(output)) {
+                const QPointF position = portPosition(output, port.id);
+                painter->setPen(QPen(colors.canvas, 2));
+                painter->setBrush(portColor(port.type, colors));
+                painter->drawEllipse(position, 6, 6);
+                painter->setPen(colors.muted);
+                const QRectF label(output ? cardWidth / 2 : 13, position.y() - 10, cardWidth / 2 - 13, 20);
+                painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft), port.label);
+            }
+        }
+
+        if (capture) {
+            paintPlot(*painter);
+            const QPointF corner = frame.bottomRight();
+            painter->setPen(QPen(isSelected() ? colors.accent : colors.muted, 1.35, Qt::SolidLine, Qt::RoundCap));
+            painter->drawLine(corner - QPointF(7, 15), corner - QPointF(15, 7));
+            painter->drawLine(corner - QPointF(7, 10), corner - QPointF(10, 7));
+        } else {
+            painter->setPen(failed ? colors.error : colors.muted);
+            const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
+            painter->drawText(QRectF(14, plotTop(), cardWidth - 28, 22), Qt::AlignLeft | Qt::AlignVCenter,
+                              painter->fontMetrics().elidedText(label, Qt::ElideRight, cardWidth - 28));
+        }
+    }
+
+    bool applySettings(const Node &node)
+    {
+        const auto nextPorts = modulePorts(definition, node.parameters, false);
+        const auto nextSize = cardSize(definition, node.parameters, node.customSize);
+        const bool changed = nextPorts != inputPorts;
+        setCardSize(nextSize);
+        inputPorts = nextPorts;
+        if (capture) {
+            capture->configure(node.parameters);
+            if (!paused)
+                shownScope = capture->frame();
+        }
+        update();
+        return changed;
+    }
+
+    void push(int channel, const QList<double> &values)
+    {
+        if (capture && !paused)
+            capture->append(channel, values);
+    }
+
+    bool isPaused() const { return paused; }
+
+    void setPaused(bool value)
+    {
+        if (capture) {
+            paused = value;
+            if (!paused)
+                capture->clear();
+            presentValues();
+        }
+    }
+
+    void rearm()
+    {
+        if (capture) {
+            paused = false;
+            capture->rearm();
+            presentValues();
+        }
+    }
+
+    void setStatus(const QString &status) { pendingStatus = status; }
+
+    void presentValues()
+    {
+        shownStatus = pendingStatus;
+        if (capture && !paused)
+            shownScope = capture->frame();
+        update();
+    }
+
+    QUuid id;
+    const ModuleDefinition &definition;
+    bool failed = false;
+    std::function<void(QPointF)> moved;
+
+protected:
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override
+    {
+        if (change == ItemPositionChange) {
+            const QPointF point = value.toPointF();
+            constexpr double limit = Graph::nodePositionLimit;
+            return QPointF(std::clamp(point.x(), -limit, limit), std::clamp(point.y(), -limit, limit));
+        }
+        if (change == ItemPositionHasChanged && moved)
+            moved(value.toPointF());
+        if (change == ItemSelectedHasChanged)
+            setZValue(value.toBool() ? 1 : 0);
+        return QGraphicsItem::itemChange(change, value);
+    }
+
+private:
+    qreal plotTop() const { return bodyTop(inputPorts.size(), definition.outputs.size()); }
+
+    void paintPlot(QPainter &painter) const
+    {
+        const QRectF plot(13, plotTop(), dimensions.width() - 26, dimensions.height() - plotTop() - scopeFooter);
+        const QRectF area = plot.adjusted(4, 4, -4, -4);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(colors.plot);
+        painter.drawRoundedRect(plot, 6, 6);
+        painter.setPen(QPen(colors.border, 0.8));
+        for (int division = 0; division <= 10; ++division) {
+            const qreal x = area.left() + area.width() * division / 10;
+            painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
+        }
+        for (int division = 0; division <= 8; ++division) {
+            const qreal y = area.top() + area.height() * division / 8;
+            painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
+        }
+        if (shownScope.samples == 0) {
+            painter.setPen(colors.muted);
+            painter.drawText(plot, Qt::AlignCenter, shownScope.status);
+        }
+
+        const double span = shownScope.upper - shownScope.lower;
+        painter.save();
+        painter.setClipRect(area);
+        painter.setBrush(Qt::NoBrush);
+        if (shownScope.triggerPosition) {
+            painter.setPen(QPen(scopeChannelColor(shownScope.triggerChannel, colors), 0.8, Qt::DashLine));
+            const qreal x = area.left() + area.width() * *shownScope.triggerPosition;
+            painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
+            const qreal y = area.bottom() - area.height() * ((shownScope.triggerLevel - shownScope.lower) / span);
+            if (y > area.top() && y < area.bottom())
+                painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y));
+        }
+        for (qsizetype channel = 0; channel < shownScope.traces.size(); ++channel) {
+            QPainterPath trace;
+            const auto &points = shownScope.traces[channel];
+            if (points.isEmpty())
+                continue;
+            const auto position = [&](const QPointF &point) {
+                const double value = std::clamp((point.y() - shownScope.lower) / span, -64.0, 65.0);
+                return QPointF(area.left() + area.width() * point.x(), area.bottom() - area.height() * value);
+            };
+            trace.moveTo(position(points.first()));
+            for (qsizetype i = 1; i < points.size(); ++i)
+                trace.lineTo(position(points.at(i)));
+            painter.setPen(QPen(scopeChannelColor(channel, colors), 1.45));
+            painter.drawPath(trace);
+            painter.drawEllipse(trace.currentPosition(), 1.5, 1.5);
+        }
+        painter.restore();
+
+        const qreal legendWidth = std::min<qreal>(40, plot.width() / std::max<qsizetype>(1, shownScope.traces.size()));
+        for (qsizetype channel = 0; channel < shownScope.traces.size(); ++channel) {
+            const qreal x = plot.left() + channel * legendWidth;
+            painter.setPen(scopeChannelColor(channel, colors));
+            painter.drawText(QRectF(x, plot.bottom() + 6, legendWidth, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                             QString("CH%1").arg(channel + 1));
+        }
+        painter.setPen(colors.muted);
+        QString summary = QString("%1 ms/格   ·   %2 单位/格")
+            .arg(QString::number(shownScope.millisecondsPerDivision, 'g', 4), QString::number(span / 8, 'g', 4));
+        if (paused || shownScope.samples > 0)
+            summary += "   ·   " + (paused ? QString("已暂停") : shownScope.status);
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 25, plot.width(), 17), Qt::AlignLeft | Qt::AlignVCenter,
+                         painter.fontMetrics().elidedText(summary, Qt::ElideRight, plot.width()));
+    }
+
+    const ThemeColors &colors;
+    QList<PortDefinition> inputPorts;
+    QSizeF dimensions;
+    std::unique_ptr<ScopeCapture> capture;
+    QString pendingStatus;
+    QString shownStatus;
+    ScopeFrame shownScope;
+    bool paused = false;
+};
+
+class EdgeItem final : public QGraphicsPathItem {
+public:
+    static constexpr int Type = UserType + 2;
+
+    EdgeItem(const Connection &edge, NodeItem &source, NodeItem &target, const ThemeColors &colors)
+        : id(edge.id), link(edge), from(source), to(target),
+          dataType(source.port(true, link.from.port)->type), colors(colors)
+    {
+        setFlag(ItemIsSelectable);
+        setZValue(-1);
+        setPen(QPen(Qt::transparent, 12));
+        updatePath();
+    }
+
+    int type() const override { return Type; }
+
+    void updatePath()
+    {
+        setPath(wirePath(from.mapToScene(from.portPosition(true, link.from.port)),
+                         to.mapToScene(to.portPosition(false, link.to.port))));
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override
+    {
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(QPen(isSelected() ? colors.accent : portColor(dataType, colors),
+                             isSelected() ? 3.5 : 2.1, Qt::SolidLine, Qt::RoundCap));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPath(path());
+    }
+
+    QUuid id;
+    Connection link;
+    NodeItem &from;
+    NodeItem &to;
+    DataType dataType;
+    const ThemeColors &colors;
+};
+
+Canvas::Canvas(Graph &graph, QWidget *parent)
+    : QGraphicsView(parent), graph(graph), workspace(new QGraphicsScene(this))
+{
+    setObjectName("canvas");
+    setAccessibleName("数据流画布");
+    constexpr qreal limit = Graph::canvasLimit;
+    workspace->setSceneRect(-limit, -limit, limit * 2, limit * 2);
+    workspace->setItemIndexMethod(QGraphicsScene::NoIndex);
+    setScene(workspace);
+    setFrameShape(QFrame::NoFrame);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setTransformationAnchor(NoAnchor);
+    setResizeAnchor(AnchorViewCenter);
+    setDragMode(RubberBandDrag);
+    setViewportUpdateMode(BoundingRectViewportUpdate);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    setRenderHint(QPainter::Antialiasing);
+    repaintTimer.setInterval(32);
+    repaintTimer.setSingleShot(true);
+    QObject::connect(&repaintTimer, &QTimer::timeout, this, &Canvas::flushSamples);
+    QObject::connect(workspace, &QGraphicsScene::selectionChanged, this, &Canvas::selectionChanged);
+}
+
+void Canvas::rebuild()
+{
+    cancelWire();
+    resizingNode = QUuid{};
+    nodes.clear();
+    edges.clear();
+    incidentEdges.clear();
+    dirtyNodes.clear();
+    workspace->clear();
+    for (const Node &node : graph.nodes())
+        addNodeItem(node);
+    for (const Connection &edge : graph.connections())
+        addEdgeItem(edge);
+    viewport()->update();
+}
+
+void Canvas::setTheme(const ThemeColors &theme)
+{
+    colors = theme;
+    if (wireStart)
+        updateWire(viewport()->mapFromGlobal(QCursor::pos()));
+    workspace->invalidate();
+    viewport()->update();
+}
+
+#ifdef FANTASYHOST_OPENGL
+void Canvas::setOpenGLViewport(bool enabled)
+{
+    if (enabled == (qobject_cast<QOpenGLWidget *>(viewport()) != nullptr))
+        return;
+    if (enabled) {
+        QOpenGLContext probe;
+        if (!probe.create()) {
+            Q_EMIT openGLViewportChanged(false);
+            Q_EMIT message("当前环境无法创建 OpenGL 上下文，画布继续使用软件绘制。");
+            return;
+        }
+    }
+    const QPointF center = mapToScene(viewport()->rect().center());
+    cancelWire();
+    setViewportUpdateMode(enabled ? FullViewportUpdate : BoundingRectViewportUpdate);
+    if (enabled) {
+        auto *gl = new QOpenGLWidget;
+        QSurfaceFormat format = gl->format();
+        format.setSamples(4);
+        gl->setFormat(format);
+        setViewport(gl);
+        QTimer::singleShot(180, this, [this, gl = QPointer<QOpenGLWidget>(gl)] {
+            if (!gl || viewport() != gl.data())
+                return;
+            if (!gl->isValid()) {
+                setOpenGLViewport(false);
+                Q_EMIT message("OpenGL 初始化失败，已切回软件绘制。");
+                return;
+            }
+            gl->makeCurrent();
+            const auto *name = gl->context()->functions()->glGetString(GL_RENDERER);
+            const QString renderer = name ? QString::fromLatin1(reinterpret_cast<const char *>(name)) : QString();
+            gl->doneCurrent();
+            Q_EMIT message(renderer.isEmpty() ? "OpenGL 绘制已启用" : QString("OpenGL 绘制 · %1").arg(renderer));
+        });
+    } else {
+        setViewport(new QWidget);
+    }
+    viewport()->setMouseTracking(true);
+    centerOn(center);
+    Q_EMIT openGLViewportChanged(enabled);
+}
+#endif
+
+void Canvas::addModule(const QString &type)
+{
+    const auto *definition = moduleDefinition(type);
+    if (!definition)
+        return;
+    const QSizeF size = cardSize(*definition, {});
+    QPointF position = mapToScene(viewport()->rect().center()) - QPointF(size.width() / 2, size.height() / 2);
+    const int direction = position.y() >= 0 ? -1 : 1;
+    while (std::any_of(nodes.cbegin(), nodes.cend(), [position, size](const NodeItem *node) {
+        return QRectF(position, size).adjusted(-20, -20, 20, 20).intersects(node->sceneBoundingRect());
+    })) {
+        position.ry() += direction * (size.height() + 34);
+    }
+    addModuleAt(type, position);
+}
+
+void Canvas::addModuleAt(const QString &type, QPointF position)
+{
+    constexpr double limit = Graph::nodePositionLimit;
+    position = {std::clamp(position.x(), -limit, limit), std::clamp(position.y(), -limit, limit)};
+    const QUuid id = graph.addNode(type, position);
+    if (id.isNull())
+        return;
+    addNodeItem(*graph.node(id));
+    Q_EMIT topologyChanged();
+    selectNode(id);
+    ensureVisible(nodes.value(id), 28, 28);
+    setFocus();
+    Q_EMIT graphChanged();
+    viewport()->update();
+}
+
+void Canvas::addNodeItem(const Node &node)
+{
+    auto *item = new NodeItem(node, colors);
+    item->moved = [this, id = node.id](QPointF position) {
+        graph.moveNode(id, position);
+        updateEdges(id);
+        Q_EMIT graphChanged();
+    };
+    nodes.insert(node.id, item);
+    workspace->addItem(item);
+}
+
+void Canvas::addEdgeItem(const Connection &edge)
+{
+    auto *item = new EdgeItem(edge, *nodes.value(edge.from.node), *nodes.value(edge.to.node), colors);
+    edges.insert(edge.id, item);
+    incidentEdges.insert(edge.from.node, edge.id);
+    incidentEdges.insert(edge.to.node, edge.id);
+    workspace->addItem(item);
+}
+
+void Canvas::removeEdgeItem(const QUuid &id)
+{
+    if (EdgeItem *edge = edges.take(id)) {
+        incidentEdges.remove(edge->link.from.node, id);
+        incidentEdges.remove(edge->link.to.node, id);
+        delete edge;
+    }
+}
+
+void Canvas::updateEdges(const QUuid &node)
+{
+    const auto range = incidentEdges.equal_range(node);
+    for (auto edge = range.first; edge != range.second; ++edge)
+        edges.value(edge.value())->updatePath();
+}
+
+void Canvas::removeSelection()
+{
+    QSet<QUuid> selectedNodes;
+    QSet<QUuid> selectedEdges;
+    for (QGraphicsItem *item : workspace->selectedItems()) {
+        if (auto *node = qgraphicsitem_cast<NodeItem *>(item)) {
+            selectedNodes.insert(node->id);
+            const auto linked = incidentEdges.values(node->id);
+            selectedEdges.unite(QSet<QUuid>(linked.cbegin(), linked.cend()));
+        } else if (auto *edge = qgraphicsitem_cast<EdgeItem *>(item)) {
+            selectedEdges.insert(edge->id);
+        }
+    }
+    if (selectedNodes.isEmpty() && selectedEdges.isEmpty())
+        return;
+    cancelWire();
+    if (selectedNodes.contains(resizingNode)) {
+        resizingNode = QUuid{};
+        viewport()->unsetCursor();
+    }
+    for (const QUuid &id : selectedEdges) {
+        graph.removeConnection(id);
+        removeEdgeItem(id);
+    }
+    for (const QUuid &id : selectedNodes) {
+        graph.removeNode(id);
+        dirtyNodes.remove(id);
+        delete nodes.take(id);
+    }
+    Q_EMIT topologyChanged();
+    Q_EMIT graphChanged();
+    viewport()->update();
+}
+
+QUuid Canvas::selectedNode() const
+{
+    const auto selected = workspace->selectedItems();
+    if (selected.size() == 1) {
+        if (auto *node = qgraphicsitem_cast<NodeItem *>(selected.first()))
+            return node->id;
+    }
+    return {};
+}
+
+int Canvas::selectedConnectionCount() const
+{
+    const auto selected = workspace->selectedItems();
+    return std::count_if(selected.cbegin(), selected.cend(), [](QGraphicsItem *item) { return item->type() == EdgeItem::Type; });
+}
+
+void Canvas::selectNode(const QUuid &id)
+{
+    workspace->clearSelection();
+    if (NodeItem *item = nodes.value(id))
+        item->setSelected(true);
+}
+
+void Canvas::fitGraph()
+{
+    resetTransform();
+    if (nodes.isEmpty()) {
+        centerOn(0, 0);
+    } else if (viewport()->width() > 80 && viewport()->height() > 80) {
+        const QRectF bounds = workspace->itemsBoundingRect();
+        const qreal factor = std::clamp(std::min((viewport()->width() - 64) / bounds.width(),
+                                                (viewport()->height() - 64) / bounds.height()), minimumZoom, 1.25);
+        scale(factor, factor);
+        centerOn(bounds.center());
+    }
+    Q_EMIT zoomChanged(transform().m11() * 100);
+}
+
+void Canvas::setFailedNode(const QUuid &id, bool failed)
+{
+    if (NodeItem *item = nodes.value(id)) {
+        item->failed = failed;
+        item->presentValues();
+    }
+}
+
+void Canvas::setNodeStatus(const QUuid &id, const QString &status)
+{
+    if (NodeItem *item = nodes.value(id)) {
+        item->setStatus(status);
+        scheduleRepaint(id);
+    }
+}
+
+void Canvas::sample(const QUuid &id, int channel, const QList<double> &values)
+{
+    if (NodeItem *item = nodes.value(id); item && !item->isPaused()) {
+        item->push(channel, values);
+        scheduleRepaint(id);
+    }
+}
+
+void Canvas::updateNodeSettings(const Node &node, const QList<QUuid> &removedEdges)
+{
+    for (const QUuid &edge : removedEdges)
+        removeEdgeItem(edge);
+    if (NodeItem *item = nodes.value(node.id); item && item->applySettings(node)) {
+        cancelWire();
+        updateEdges(node.id);
+    }
+}
+
+bool Canvas::scopePaused(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item && item->isPaused();
+}
+
+void Canvas::setScopePaused(const QUuid &id, bool paused)
+{
+    if (NodeItem *item = nodes.value(id))
+        item->setPaused(paused);
+}
+
+void Canvas::rearmScope(const QUuid &id)
+{
+    if (NodeItem *item = nodes.value(id))
+        item->rearm();
+}
+
+void Canvas::scheduleRepaint(const QUuid &id)
+{
+    dirtyNodes.insert(id);
+    if (!repaintTimer.isActive())
+        repaintTimer.start();
+}
+
+void Canvas::flushSamples()
+{
+    for (const QUuid &id : std::as_const(dirtyNodes)) {
+        if (NodeItem *item = nodes.value(id))
+            item->presentValues();
+    }
+    dirtyNodes.clear();
+}
+
+void Canvas::drawBackground(QPainter *painter, const QRectF &bounds)
+{
+    const qreal margin = 2 / transform().m11();
+    const QRectF exposed = bounds.adjusted(-margin, -margin, margin, margin);
+    painter->fillRect(exposed, colors.canvas);
+    qreal spacing = 24;
+    while (spacing * transform().m11() < 9.6)
+        spacing *= 5;
+    const qreal xFirst = std::floor(exposed.left() / spacing) * spacing;
+    const qreal yFirst = std::floor(exposed.top() / spacing) * spacing;
+    QVarLengthArray<QPointF, 1024> points;
+    for (qreal x = xFirst; x <= exposed.right(); x += spacing) {
+        for (qreal y = yFirst; y <= exposed.bottom(); y += spacing)
+            points.append({x, y});
+    }
+    QPen pen(colors.grid);
+    pen.setCosmetic(true);
+    pen.setWidthF(1.5);
+    pen.setCapStyle(Qt::RoundCap);
+    painter->setPen(pen);
+    if (!points.isEmpty())
+        painter->drawPoints(points.constData(), points.size());
+}
+
+void Canvas::drawForeground(QPainter *painter, const QRectF &)
+{
+    if (!nodes.isEmpty())
+        return;
+    painter->save();
+    painter->resetTransform();
+    painter->setPen(colors.muted);
+    painter->drawText(viewport()->rect(), Qt::AlignCenter, "双击左侧模块，或在画布上右键添加");
+    painter->restore();
+}
+
+void Canvas::wheelEvent(QWheelEvent *event)
+{
+    if (!resizingNode.isNull()) {
+        event->accept();
+        return;
+    }
+    const qreal steps = event->angleDelta().y() != 0 ? event->angleDelta().y() / 120.0 : event->pixelDelta().y() / 90.0;
+    if (steps == 0) {
+        event->ignore();
+        return;
+    }
+    const QPoint cursor = event->position().toPoint();
+    const QPointF anchor = mapToScene(cursor);
+    const qreal current = transform().m11();
+    const qreal next = std::clamp(current * std::pow(1.16, steps), minimumZoom, 2.6);
+    scale(next / current, next / current);
+    centerOn(mapToScene(viewport()->rect().center()) + anchor - mapToScene(cursor));
+    if (wireStart)
+        updateWire(cursor);
+    Q_EMIT zoomChanged(next * 100);
+    event->accept();
+}
+
+std::optional<Canvas::PortHit> Canvas::portAt(const QPoint &position) const
+{
+    const QPointF scenePosition = mapToScene(position);
+    for (QGraphicsItem *item : items(position)) {
+        auto *node = qgraphicsitem_cast<NodeItem *>(item);
+        if (!node)
+            continue;
+        for (bool output : {false, true}) {
+            for (const PortDefinition &port : node->ports(output)) {
+                if (QLineF(node->mapFromScene(scenePosition), node->portPosition(output, port.id)).length() <= 9)
+                    return PortHit{{node->id, port.id}, output};
+            }
+        }
+        break;
+    }
+    return std::nullopt;
+}
+
+QString Canvas::wireError(const PortHit &target) const
+{
+    if (wireStart->output == target.output)
+        return "请连接一个输出端口和一个输入端口。";
+    const Endpoint &from = wireStart->output ? wireStart->endpoint : target.endpoint;
+    const Endpoint &to = wireStart->output ? target.endpoint : wireStart->endpoint;
+    return graph.connectionError(from, to, true);
+}
+
+void Canvas::updateWire(const QPoint &position)
+{
+    const auto target = portAt(position);
+    const NodeItem *item = nodes.value(wireStart->endpoint.node);
+    const bool output = wireStart->output;
+    const QPointF start = item->mapToScene(item->portPosition(output, wireStart->endpoint.port));
+    const QPointF end = mapToScene(position);
+    const auto *port = item->port(output, wireStart->endpoint.port);
+    const QColor color = target && !wireError(*target).isEmpty() ? colors.error : portColor(port->type, colors);
+    draftWire->setPen(QPen(color, 2, Qt::DashLine, Qt::RoundCap));
+    draftWire->setPath(output ? wirePath(start, end) : wirePath(end, start));
+}
+
+void Canvas::cancelWire()
+{
+    if (!wireStart)
+        return;
+    wireStart.reset();
+    delete draftWire;
+    draftWire = nullptr;
+    viewport()->setCursor(spaceHeld ? Qt::OpenHandCursor : Qt::ArrowCursor);
+}
+
+NodeItem *Canvas::resizeGripAt(const QPoint &position) const
+{
+    auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(position));
+    return node && node->onResizeGrip(node->mapFromScene(mapToScene(position))) ? node : nullptr;
+}
+
+void Canvas::resizeCard(const QPoint &position)
+{
+    if (NodeItem *node = nodes.value(resizingNode)) {
+        const QPointF delta = mapToScene(position) - resizeOrigin;
+        const QSizeF size = node->fittedResize(resizeInitialSize + QSizeF(delta.x(), delta.y()));
+        if (size != node->card().size() && graph.resizeNode(node->id, size)) {
+            node->setCardSize(size);
+            updateEdges(node->id);
+            Q_EMIT graphChanged();
+        }
+    }
+}
+
+void Canvas::mousePressEvent(QMouseEvent *event)
+{
+    const QPoint position = event->position().toPoint();
+    if (panButton != Qt::NoButton || wireStart || !resizingNode.isNull()) {
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::MiddleButton || (spaceHeld && event->button() == Qt::LeftButton)) {
+        setFocus();
+        panButton = event->button();
+        panPosition = position;
+        viewport()->setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::LeftButton) {
+        if (NodeItem *node = resizeGripAt(position)) {
+            setFocus();
+            resizingNode = node->id;
+            if (!node->isSelected())
+                selectNode(node->id);
+            resizeOrigin = mapToScene(position);
+            resizeInitialSize = node->card().size();
+            viewport()->setCursor(Qt::SizeFDiagCursor);
+            event->accept();
+            return;
+        }
+        if (const auto port = portAt(position)) {
+            setFocus();
+            wireStart = port;
+            draftWire = workspace->addPath({});
+            draftWire->setZValue(-0.5);
+            draftWire->setAcceptedMouseButtons(Qt::NoButton);
+            viewport()->setCursor(Qt::CrossCursor);
+            updateWire(position);
+            event->accept();
+            return;
+        }
+    }
+    QGraphicsView::mousePressEvent(event);
+}
+
+void Canvas::mouseMoveEvent(QMouseEvent *event)
+{
+    const QPoint position = event->position().toPoint();
+    if (panButton != Qt::NoButton) {
+        const QPoint delta = position - panPosition;
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+        panPosition = position;
+        event->accept();
+    } else if (wireStart) {
+        updateWire(position);
+        event->accept();
+    } else if (!resizingNode.isNull()) {
+        resizeCard(position);
+        event->accept();
+    } else {
+        if (!spaceHeld && !event->buttons())
+            viewport()->setCursor(resizeGripAt(position) ? Qt::SizeFDiagCursor : Qt::ArrowCursor);
+        QGraphicsView::mouseMoveEvent(event);
+    }
+}
+
+void Canvas::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (!resizingNode.isNull() && event->button() == Qt::LeftButton) {
+        const QPoint position = event->position().toPoint();
+        resizeCard(position);
+        resizingNode = QUuid{};
+        viewport()->setCursor(spaceHeld ? Qt::OpenHandCursor : resizeGripAt(position) ? Qt::SizeFDiagCursor : Qt::ArrowCursor);
+        event->accept();
+        return;
+    }
+    if (event->button() == panButton) {
+        panButton = Qt::NoButton;
+        viewport()->setCursor(spaceHeld ? Qt::OpenHandCursor : Qt::ArrowCursor);
+        event->accept();
+        return;
+    }
+    if (wireStart && event->button() == Qt::LeftButton) {
+        const auto target = portAt(event->position().toPoint());
+        if (target && (!(target->endpoint == wireStart->endpoint) || target->output != wireStart->output)) {
+            QString error = wireError(*target);
+            if (error.isEmpty()) {
+                const Endpoint &from = wireStart->output ? wireStart->endpoint : target->endpoint;
+                const Endpoint &to = wireStart->output ? target->endpoint : wireStart->endpoint;
+                QUuid replaced;
+                const QUuid id = graph.connect(from, to, &replaced, error);
+                if (!id.isNull()) {
+                    removeEdgeItem(replaced);
+                    addEdgeItem(graph.connections().value(id));
+                    Q_EMIT topologyChanged();
+                    Q_EMIT graphChanged();
+                    Q_EMIT message(replaced.isNull() ? "已连接端口" : "已替换输入连接");
+                }
+            }
+            if (!error.isEmpty())
+                Q_EMIT message(error);
+        }
+        cancelWire();
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseReleaseEvent(event);
+}
+
+void Canvas::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (wireStart || !resizingNode.isNull())
+        return;
+    QMenu menu(this);
+    if (QGraphicsItem *item = itemAt(event->pos()); item && (item->flags() & QGraphicsItem::ItemIsSelectable)) {
+        if (!item->isSelected()) {
+            workspace->clearSelection();
+            item->setSelected(true);
+        }
+        menu.addAction("删除选中项", this, &Canvas::removeSelection);
+    } else {
+        const QPointF position = mapToScene(event->pos());
+        for (const ModuleDefinition &definition : moduleDefinitions()) {
+            menu.addAction(definition.name, this, [this, id = definition.id, position] { addModuleAt(id, position); });
+        }
+    }
+    menu.exec(event->globalPos());
+}
+
+void Canvas::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Delete) {
+        removeSelection();
+    } else if (event->key() == Qt::Key_Space) {
+        if (!event->isAutoRepeat()) {
+            spaceHeld = true;
+            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton)
+                viewport()->setCursor(Qt::OpenHandCursor);
+        }
+    } else if (event->key() == Qt::Key_Escape && wireStart) {
+        cancelWire();
+    } else {
+        QGraphicsView::keyPressEvent(event);
+        return;
+    }
+    event->accept();
+}
+
+void Canvas::keyReleaseEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Space) {
+        if (!event->isAutoRepeat()) {
+            spaceHeld = false;
+            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton)
+                viewport()->unsetCursor();
+        }
+        event->accept();
+    } else {
+        QGraphicsView::keyReleaseEvent(event);
+    }
+}
+
+void Canvas::focusOutEvent(QFocusEvent *event)
+{
+    spaceHeld = false;
+    panButton = Qt::NoButton;
+    resizingNode = QUuid{};
+    cancelWire();
+    viewport()->unsetCursor();
+    QGraphicsView::focusOutEvent(event);
+}
