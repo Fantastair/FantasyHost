@@ -47,6 +47,7 @@ void GraphRunner::add(const Node &node)
         [this, id](int channel, const QList<double> &values) { Q_EMIT samplesReceived(id, channel, values); },
         [this, id](const QByteArray &bytes) { if (isOpen(id)) Q_EMIT serialReceived(id, bytes); },
         [this, id](const QString &message) { fail(id, message); },
+        [this, id](const QString &text) { Q_EMIT textReceived(id, text); },
     });
     module->setParameters(node.parameters);
     modules.emplace(id, Entry{std::move(module), definition.manualOpen, !definition.manualOpen});

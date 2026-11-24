@@ -12,6 +12,7 @@ qt_add_executable(FantasyHost WIN32 MACOSX_BUNDLE
     src/main.cpp
     src/graph.cpp src/graph.h
     src/modules.cpp src/modules.h
+    src/textdisplay.cpp src/textdisplay.h
     src/runner.cpp src/runner.h
     src/scope.cpp src/scope.h
     src/theme.cpp src/theme.h

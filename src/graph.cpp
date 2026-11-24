@@ -88,11 +88,15 @@ bool Graph::setParameter(const QUuid &id, const QString &name, const QJsonValue 
     found->parameters.insert(name, value);
     normalizeParameters(definition, found->parameters);
     if (parameter->affectsPorts) {
+        QSet<QString> inputs;
+        QSet<QString> outputs;
+        for (const auto &port : modulePorts(definition, found->parameters, false))
+            inputs.insert(port.id);
+        for (const auto &port : modulePorts(definition, found->parameters, true))
+            outputs.insert(port.id);
         for (auto edge = connections_.begin(); edge != connections_.end();) {
-            const bool missingInput = edge->to.node == id
-                && !portDefinition(definition, found->parameters, false, edge->to.port);
-            const bool missingOutput = edge->from.node == id
-                && !portDefinition(definition, found->parameters, true, edge->from.port);
+            const bool missingInput = edge->to.node == id && !inputs.contains(edge->to.port);
+            const bool missingOutput = edge->from.node == id && !outputs.contains(edge->from.port);
             if (missingInput || missingOutput) {
                 if (removed)
                     removed->append(edge.key());
@@ -126,7 +130,7 @@ QString Graph::connectionError(const Endpoint &from, const Endpoint &to, bool re
     const auto input = target ? portDefinition(*moduleDefinition(target->type), target->parameters, false, to.port) : std::nullopt;
     if (!output || !input)
         return "请连接一个输出端口和一个输入端口。";
-    if (output->type != input->type)
+    if (output->type != input->type && input->type != DataType::Any)
         return "端口的数据类型不匹配。";
     if (from.node == to.node)
         return "端口必须属于不同的模块。";

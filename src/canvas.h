@@ -26,6 +26,8 @@ public:
     void selectNode(const QUuid &id);
     void setFailedNode(const QUuid &id, bool failed);
     void setNodeStatus(const QUuid &id, const QString &status);
+    void setNodeDisplayText(const QUuid &id, const QString &text);
+    QString nodeDisplayText(const QUuid &id) const;
     void sample(const QUuid &id, int channel, const QList<double> &values);
     void updateNodeSettings(const Node &node, const QList<QUuid> &removedEdges);
     bool scopePaused(const QUuid &id) const;
@@ -42,6 +44,7 @@ Q_SIGNALS:
     void selectionChanged();
     void message(const QString &text);
     void zoomChanged(double percent);
+    void displayTextPresented(const QUuid &id, const QString &text);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);
 #endif

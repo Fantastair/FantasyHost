@@ -42,6 +42,7 @@ private:
     void refreshInspector();
     void createSerialControls(QWidget *pane, const Node &node);
     void createScopeControls(QWidget *pane, const QUuid &id);
+    QWidget *createTextTemplateEditor(QWidget *parent, const Node &node, const ParameterDefinition &parameter);
     void refreshSerialPreview();
     void commitInspectorEdits();
     void setParameter(const QUuid &id, const QString &parameter, const QJsonValue &value);
@@ -64,8 +65,10 @@ private:
     QLabel *zoomStatus = nullptr;
     QPlainTextEdit *serialPreview = nullptr;
     QPlainTextEdit *serialInput = nullptr;
+    QPlainTextEdit *textDisplayPreview = nullptr;
     QHash<QUuid, QByteArray> serialHistory;
     QHash<QUuid, QString> serialDrafts;
+    QHash<QUuid, QString> textTemplateDrafts;
     QTimer serialPreviewTimer;
     QUuid inspectedNode;
     QString projectPath;

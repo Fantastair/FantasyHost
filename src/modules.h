@@ -10,8 +10,8 @@
 #include <utility>
 #include <variant>
 
-enum class DataType { Bytes, Number };
-enum class ParameterKind { Number, SerialPort, Choice };
+enum class DataType { Bytes, Number, Any };
+enum class ParameterKind { Number, SerialPort, Choice, TextTemplate };
 using Packet = std::variant<QByteArray, double>;
 
 struct PortDefinition {
@@ -45,6 +45,7 @@ struct ModuleCallbacks {
     std::function<void(int, const QList<double> &)> samples;
     std::function<void(const QByteArray &)> received;
     std::function<void(const QString &)> fail;
+    std::function<void(const QString &)> displayText;
 };
 
 class Module {
@@ -75,6 +76,7 @@ struct ModuleDefinition {
     QList<PortDefinition> (*dynamicInputs)(const QJsonObject &) = nullptr;
     bool scope = false;
     bool manualOpen = false;
+    bool displaysText = false;
 };
 
 const QList<ModuleDefinition> &moduleDefinitions();

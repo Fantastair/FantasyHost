@@ -1,6 +1,7 @@
 #include "modules.h"
 
 #include "scope.h"
+#include "textdisplay.h"
 
 #include <QSerialPort>
 #include <QtEndian>
@@ -339,6 +340,7 @@ const QList<ModuleDefinition> &moduleDefinitions()
             choice("triggerEdge", "触发边沿", "rising", {{"rising", "上升沿"}, {"falling", "下降沿"}}, true),
             number("triggerLevel", "触发电平", 0, -1000000000000.0, 1000000000000.0, 6, true),
         }, &create<ScopeInput>, &scopeInputs, true},
+        textDisplayDefinition(),
     };
     return definitions;
 }
@@ -387,6 +389,8 @@ bool acceptsParameter(const ParameterDefinition &parameter, const QJsonValue &va
     }
     if (parameter.kind == ParameterKind::SerialPort)
         return value.isString();
+    if (parameter.kind == ParameterKind::TextTemplate)
+        return value.isString() && value.toString().size() <= parameter.maximum;
     if (!value.isDouble())
         return false;
     const double number = value.toDouble();

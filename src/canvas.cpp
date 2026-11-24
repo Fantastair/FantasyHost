@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
+#include <QTextOption>
 #include <QVarLengthArray>
 #include <QWheelEvent>
 #ifdef FANTASYHOST_OPENGL
@@ -43,11 +44,15 @@ QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameter
         const qreal extraPortHeight = top - bodyTop(1, 0);
         return {customSize.width(), std::max(customSize.height(), Graph::minScopeHeight + extraPortHeight)};
     }
+    if (definition.displaysText)
+        return {336, top + 136};
     return {definition.scope ? 352.0 : 234.0, top + (definition.scope ? 208.0 : 31.0)};
 }
 
 QColor portColor(DataType type, const ThemeColors &colors)
 {
+    if (type == DataType::Any)
+        return colors.accent;
     return type == DataType::Number ? colors.number : colors.bytes;
 }
 
@@ -189,7 +194,8 @@ public:
                 painter->drawEllipse(position, 6, 6);
                 painter->setPen(colors.muted);
                 const QRectF label(output ? cardWidth / 2 : 13, position.y() - 10, cardWidth / 2 - 13, 20);
-                painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft), port.label);
+                painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft),
+                                  painter->fontMetrics().elidedText(port.label, Qt::ElideRight, label.width()));
             }
         }
 
@@ -199,6 +205,8 @@ public:
             painter->setPen(QPen(isSelected() ? colors.accent : colors.muted, 1.35, Qt::SolidLine, Qt::RoundCap));
             painter->drawLine(corner - QPointF(7, 15), corner - QPointF(15, 7));
             painter->drawLine(corner - QPointF(7, 10), corner - QPointF(10, 7));
+        } else if (definition.displaysText) {
+            paintText(*painter);
         } else {
             painter->setPen(failed ? colors.error : colors.muted);
             const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
@@ -251,10 +259,13 @@ public:
     }
 
     void setStatus(const QString &status) { pendingStatus = status; }
+    const QString &displayText() const { return pendingText; }
+    void setDisplayText(const QString &text) { pendingText = text; }
 
     void presentValues()
     {
         shownStatus = pendingStatus;
+        shownText = pendingText;
         if (capture && !paused)
             shownScope = capture->frame();
         update();
@@ -282,6 +293,22 @@ protected:
 
 private:
     qreal plotTop() const { return bodyTop(inputPorts.size(), definition.outputs.size()); }
+
+    void paintText(QPainter &painter) const
+    {
+        const QRectF panel(13, plotTop(), dimensions.width() - 26, dimensions.height() - plotTop() - 13);
+        painter.save();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(colors.plot);
+        painter.drawRoundedRect(panel, 6, 6);
+        const QRectF content = panel.adjusted(10, 8, -10, -8);
+        painter.setClipRect(content);
+        painter.setPen(colors.text);
+        QTextOption options(Qt::AlignLeft | Qt::AlignTop);
+        options.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        painter.drawText(content, shownText, options);
+        painter.restore();
+    }
 
     void paintPlot(QPainter &painter) const
     {
@@ -356,6 +383,8 @@ private:
     std::unique_ptr<ScopeCapture> capture;
     QString pendingStatus;
     QString shownStatus;
+    QString pendingText;
+    QString shownText;
     ScopeFrame shownScope;
     bool paused = false;
 };
@@ -651,6 +680,20 @@ void Canvas::setNodeStatus(const QUuid &id, const QString &status)
     }
 }
 
+void Canvas::setNodeDisplayText(const QUuid &id, const QString &text)
+{
+    if (NodeItem *item = nodes.value(id); item && item->displayText() != text) {
+        item->setDisplayText(text);
+        scheduleRepaint(id);
+    }
+}
+
+QString Canvas::nodeDisplayText(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item ? item->displayText() : QString();
+}
+
 void Canvas::sample(const QUuid &id, int channel, const QList<double> &values)
 {
     if (NodeItem *item = nodes.value(id); item && !item->isPaused()) {
@@ -697,8 +740,11 @@ void Canvas::scheduleRepaint(const QUuid &id)
 void Canvas::flushSamples()
 {
     for (const QUuid &id : std::as_const(dirtyNodes)) {
-        if (NodeItem *item = nodes.value(id))
+        if (NodeItem *item = nodes.value(id)) {
             item->presentValues();
+            if (item->definition.displaysText)
+                Q_EMIT displayTextPresented(id, item->displayText());
+        }
     }
     dirtyNodes.clear();
 }

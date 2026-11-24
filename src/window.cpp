@@ -41,7 +41,7 @@ const QString projectFilter = "FantasyHost 工程 (*.fhgraph)";
 const QString appearanceSetting = "view/appearance";
 constexpr qsizetype serialPreviewLimit = 16 * 1024;
 const QMap<QString, WorkspaceIcon> moduleIcons{
-    {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform},
+    {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform}, {"text", WorkspaceIcon::Text},
 };
 
 QLabel *wrappedLabel(const QString &text, QWidget *parent)
@@ -139,6 +139,11 @@ MainWindow::MainWindow(QWidget *parent)
         zoomStatus->setText(QString::number(percent, 'f', percent < 1 ? 3 : 0) + '%');
     });
     connect(&runner, &GraphRunner::samplesReceived, canvas, &Canvas::sample);
+    connect(&runner, &GraphRunner::textReceived, canvas, &Canvas::setNodeDisplayText);
+    connect(canvas, &Canvas::displayTextPresented, this, [this](const QUuid &id, const QString &text) {
+        if (textDisplayPreview && id == inspectedNode)
+            textDisplayPreview->setPlainText(text);
+    });
     serialPreviewTimer.setSingleShot(true);
     serialPreviewTimer.setInterval(80);
     connect(&serialPreviewTimer, &QTimer::timeout, this, &MainWindow::refreshSerialPreview);
@@ -375,6 +380,7 @@ void MainWindow::refreshInspector()
 {
     serialPreview = nullptr;
     serialInput = nullptr;
+    textDisplayPreview = nullptr;
     while (QLayoutItem *item = inspectorLayout->takeAt(0)) {
         delete item->widget();
         delete item;
@@ -402,10 +408,12 @@ void MainWindow::refreshInspector()
     name->setFont(font);
     inspectorLayout->addWidget(name);
     inspectorLayout->addWidget(wrappedLabel(definition.description, pane));
-    const QString status = runner.status(id);
-    nodeStatus = wrappedLabel(status.isEmpty() ? QString("等待输入") : status, pane);
-    nodeStatus->setAccessibleName("模块状态");
-    inspectorLayout->addWidget(nodeStatus);
+    if (!definition.displaysText) {
+        const QString status = runner.status(id);
+        nodeStatus = wrappedLabel(status.isEmpty() ? QString("等待输入") : status, pane);
+        nodeStatus->setAccessibleName("模块状态");
+        inspectorLayout->addWidget(nodeStatus);
+    }
     if (definition.scope)
         createScopeControls(pane, id);
     else if (definition.id == "serial")
@@ -419,7 +427,12 @@ void MainWindow::refreshInspector()
     for (const ParameterDefinition &parameter : definition.parameters) {
         const QJsonValue current = node->parameters.value(parameter.id);
         QWidget *editor = nullptr;
-        if (parameter.id == "baud") {
+        if (parameter.kind == ParameterKind::TextTemplate) {
+            editor = createTextTemplateEditor(formPane, *node, parameter);
+            form->addRow(new QLabel(parameter.label, formPane));
+            form->addRow(editor);
+            continue;
+        } else if (parameter.id == "baud") {
             auto *baud = new QComboBox(formPane);
             baud->setEditable(true);
             baud->setInsertPolicy(QComboBox::NoInsert);
@@ -497,6 +510,60 @@ void MainWindow::refreshInspector()
         delete formPane;
 
     inspectorLayout->addStretch();
+}
+
+QWidget *MainWindow::createTextTemplateEditor(QWidget *parent, const Node &node, const ParameterDefinition &parameter)
+{
+    const QUuid id = node.id;
+    const QString key = parameter.id;
+    const auto limit = static_cast<qsizetype>(parameter.maximum);
+    auto *section = new QWidget(parent);
+    auto *layout = new QVBoxLayout(section);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(7);
+
+    auto *editor = new QPlainTextEdit(section);
+    editor->setObjectName("textTemplateInput");
+    editor->setAccessibleName(parameter.label);
+    editor->setPlaceholderText("例如 温度 {temperature} °C");
+    editor->setFixedHeight(112);
+    editor->setPlainText(textTemplateDrafts.value(id, node.parameters.value(key).toString()));
+    layout->addWidget(editor);
+
+    auto *limitMessage = wrappedLabel(QString("模板长度最多 %1 个字符。").arg(limit), section);
+    layout->addWidget(limitMessage);
+    auto *apply = new QPushButton("应用模板", section);
+    apply->setObjectName("applyTextTemplate");
+    layout->addWidget(apply);
+
+    const auto refresh = [this, id, key, limit, editor, limitMessage, apply] {
+        const Node *current = graph.node(id);
+        if (!current)
+            return;
+        const QString text = editor->toPlainText();
+        const bool modified = text != current->parameters.value(key).toString();
+        if (modified)
+            textTemplateDrafts.insert(id, text);
+        else
+            textTemplateDrafts.remove(id);
+        limitMessage->setVisible(text.size() > limit);
+        apply->setEnabled(modified && text.size() <= limit);
+    };
+    connect(editor, &QPlainTextEdit::textChanged, this, refresh);
+    connect(apply, &QPushButton::clicked, this, [this, id, key, editor, refresh] {
+        setParameter(id, key, editor->toPlainText());
+        refresh();
+    });
+    refresh();
+
+    layout->addWidget(wrappedLabel("显示预览", section));
+    textDisplayPreview = new QPlainTextEdit(canvas->nodeDisplayText(id), section);
+    textDisplayPreview->setObjectName("textDisplayPreview");
+    textDisplayPreview->setAccessibleName("显示预览");
+    textDisplayPreview->setReadOnly(true);
+    textDisplayPreview->setFixedHeight(110);
+    layout->addWidget(textDisplayPreview);
+    return section;
 }
 
 void MainWindow::createSerialControls(QWidget *pane, const Node &node)
@@ -655,6 +722,7 @@ void MainWindow::setProject(Graph next, const QString &path)
     runner.reset();
     serialHistory.clear();
     serialDrafts.clear();
+    textTemplateDrafts.clear();
     graph = std::move(next);
     projectPath = path;
     modified = false;

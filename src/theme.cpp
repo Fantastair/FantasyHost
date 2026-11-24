@@ -83,9 +83,9 @@ QString workspaceStyle(const ThemeColors &colors)
         QToolBar#projectToolbar QToolButton:focus, QWidget#dockHeader QToolButton:focus,
         QPushButton:focus, QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid @accent; }
         QPushButton { background: @card; border-color: @border; padding: 5px 9px; min-height: 19px; }
-        QPushButton#serialToggle[portOpen="false"] { background: @accent; color: @onAccent; border-color: @accent; }
-        QPushButton#serialToggle[portOpen="false"]:hover { background: @accentHover; }
-        QPushButton#serialToggle[portOpen="false"]:focus { border-color: @onAccent; }
+        QPushButton#serialToggle[portOpen="false"], QPushButton#applyTextTemplate:enabled { background: @accent; color: @onAccent; border-color: @accent; }
+        QPushButton#serialToggle[portOpen="false"]:hover, QPushButton#applyTextTemplate:enabled:hover { background: @accentHover; }
+        QPushButton#serialToggle[portOpen="false"]:focus, QPushButton#applyTextTemplate:enabled:focus { border-color: @onAccent; }
         QPushButton:disabled, QLineEdit:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
             color: @disabled; background: @surface;
         }
@@ -114,10 +114,11 @@ QString workspaceStyle(const ThemeColors &colors)
         QWidget#numberEditor > QToolButton:pressed { background: @selection; }
         QWidget#numberEditor > QToolButton:focus { border-color: @accent; }
         QWidget#numberEditor > QToolButton:disabled { color: @disabled; }
-        QPlainTextEdit#serialPreview, QPlainTextEdit#serialInput {
+        QPlainTextEdit#serialPreview, QPlainTextEdit#serialInput, QPlainTextEdit#textTemplateInput, QPlainTextEdit#textDisplayPreview {
             background: @card; color: @text; border: 1px solid @border; border-radius: 5px; padding: 4px;
         }
-        QPlainTextEdit#serialPreview:focus, QPlainTextEdit#serialInput:focus { border-color: @accent; }
+        QPlainTextEdit#serialPreview:focus, QPlainTextEdit#serialInput:focus,
+        QPlainTextEdit#textTemplateInput:focus, QPlainTextEdit#textDisplayPreview:focus { border-color: @accent; }
         QComboBox QLineEdit { border: 0; padding: 0; }
         QStatusBar { border-top: 1px solid @border; }
         QStatusBar::item { border: 0; }
@@ -177,6 +178,11 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
     case WorkspaceIcon::Waveform:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
         polyline({{4, 9}, {6, 9}, {8, 6}, {10, 12}, {12, 9}, {14, 9}});
+        break;
+    case WorkspaceIcon::Text:
+        p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
+        p.drawLine(QPointF(5, 7), QPointF(13, 7));
+        p.drawLine(QPointF(5, 11), QPointF(10, 11));
         break;
     }
 }

@@ -26,6 +26,7 @@ public:
 Q_SIGNALS:
     void samplesReceived(const QUuid &id, int channel, const QList<double> &values);
     void serialReceived(const QUuid &id, const QByteArray &bytes);
+    void textReceived(const QUuid &id, const QString &text);
     void statusChanged(const QUuid &id, const QString &status);
     void failed(const QUuid &id, const QString &message);
 
