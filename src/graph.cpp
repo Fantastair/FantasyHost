@@ -133,7 +133,9 @@ QString Graph::connectionError(const Endpoint &from, const Endpoint &to, bool re
     const auto input = target ? portDefinition(*moduleDefinition(target->type), target->parameters, false, to.port) : std::nullopt;
     if (!output || !input)
         return "请连接一个输出端口和一个输入端口。";
-    if (output->type != input->type && (input->type != DataType::Any || output->type == DataType::Waveform))
+    const bool scalarInput = input->type == DataType::Any && (output->type == DataType::Bytes || output->type == DataType::Number);
+    const bool singleToBundle = input->type == DataType::Waveform && output->type == DataType::WaveformChannel;
+    if (output->type != input->type && !scalarInput && !singleToBundle)
         return "端口的数据类型不匹配。";
     if (from.node == to.node)
         return "端口必须属于不同的模块。";

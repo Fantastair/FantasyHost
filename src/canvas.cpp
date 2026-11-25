@@ -70,8 +70,10 @@ QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameter
     return {234, last + 47};
 }
 
-QColor portColor(DataType type, const ThemeColors &colors)
+QColor portColor(DataType type, const ThemeColors &colors, const QString &id)
 {
+    if (type == DataType::WaveformChannel && channelPortIndex(id) >= 0)
+        return waveformChannelColor(channelPortIndex(id), colors);
     if (type == DataType::Any || type == DataType::Waveform)
         return colors.accent;
     return type == DataType::Number ? colors.number : colors.bytes;
@@ -126,7 +128,8 @@ public:
     {
         const int lanes = recording ? recordingLanes() : 1;
         const qreal minimumHeight = lanes > 1 ? chartTop + 18 + 28 + lanes * 68 : Graph::minScopeHeight;
-        return {std::clamp(requested.width(), Graph::minScopeWidth, Graph::maxScopeSize),
+        const qreal minimumWidth = hasChannelOutputs() ? 332 : Graph::minScopeWidth;
+        return {std::clamp(requested.width(), minimumWidth, Graph::maxScopeSize),
                 std::clamp(requested.height(), std::max(minimumHeight, Graph::minScopeHeight), Graph::maxScopeSize)};
     }
 
@@ -174,8 +177,10 @@ public:
         const auto &list = ports(output);
         for (qsizetype index = 0; index < list.size(); ++index) {
             if (list.at(index).id == id) {
-                const qreal top = definition.displaysText ? textPortTop : output && recording ? 20 : portTop;
-                return {output ? dimensions.width() : 0, top + portSpacing * index};
+                qreal y = (definition.displaysText ? textPortTop : portTop) + portSpacing * index;
+                if (output && recording)
+                    y = id == waveformViewportPort ? 20 : portTop + portSpacing * channelPortIndex(id);
+                return {output ? dimensions.width() : 0, y};
             }
         }
         return {};
@@ -213,7 +218,7 @@ public:
             if (failed) {
                 painter->setPen(Qt::NoPen);
                 painter->setBrush(colors.error);
-                painter->drawEllipse(QPointF(cardWidth - (recording && !outputPorts.isEmpty() ? 102 : 17), 20), 3.5, 3.5);
+                painter->drawEllipse(QPointF(cardWidth - (port(true, waveformViewportPort) ? 102 : 17), 20), 3.5, 3.5);
             }
             painter->setPen(colors.border);
             painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
@@ -226,14 +231,16 @@ public:
             for (const PortDefinition &port : ports(output)) {
                 const QPointF position = portPosition(output, port.id);
                 painter->setPen(QPen(colors.canvas, 2));
-                painter->setBrush(portColor(port.type, colors));
+                painter->setBrush(portColor(port.type, colors, port.id));
                 const qreal radius = definition.displaysText ? 4.5 : 5.5;
                 painter->drawEllipse(position, radius, radius);
                 if (definition.displaysText)
                     continue;
                 painter->setPen(colors.muted);
-                const qreal labelWidth = resizable() && !output ? chartLeft() - 16 : cardWidth / 2 - 13;
-                const QRectF label(output ? cardWidth / 2 : 12, position.y() - 9, labelWidth, 18);
+                qreal labelWidth = resizable() && !output ? chartLeft() - 16 : cardWidth / 2 - 13;
+                if (output && port.type == DataType::WaveformChannel)
+                    labelWidth = 32;
+                const QRectF label(output ? cardWidth - 13 - labelWidth : 12, position.y() - 9, labelWidth, 18);
                 painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft),
                                   painter->fontMetrics().elidedText(port.label, Qt::ElideRight, label.width()));
             }
@@ -437,7 +444,12 @@ private:
         return inputPorts.isEmpty() ? 13 : inputPorts.first().id == "ch1" && inputPorts.first().label != "CH1" ? 78 : 47;
     }
 
-    QRectF recordingChart() const { return card().adjusted(chartLeft(), chartTop, -13, -18); }
+    bool hasChannelOutputs() const
+    {
+        return recording && !outputPorts.isEmpty() && outputPorts.last().type == DataType::WaveformChannel;
+    }
+
+    QRectF recordingChart() const { return card().adjusted(chartLeft(), chartTop, hasChannelOutputs() ? -49 : -13, -18); }
 
     int recordingChannels() const { return std::max(configuredChannels, recording->channelCount()); }
     int recordingLanes() const { return recordingLayout == WaveformLayout::Separate ? recordingChannels() : 1; }
@@ -618,7 +630,7 @@ public:
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override
     {
         painter->setRenderHint(QPainter::Antialiasing);
-        painter->setPen(QPen(isSelected() ? colors.accent : portColor(dataType, colors),
+        painter->setPen(QPen(isSelected() ? colors.accent : portColor(dataType, colors, link.from.port),
                              isSelected() ? 3.5 : 2.1, Qt::SolidLine, Qt::RoundCap));
         painter->setBrush(Qt::NoBrush);
         painter->drawPath(path());
@@ -1016,7 +1028,7 @@ void Canvas::scheduleRepaint(const QUuid &id)
 
 void Canvas::scheduleRecordingViewport(const QUuid &id)
 {
-    if (NodeItem *item = nodes.value(id); item && item->port(true, waveformViewportPort)) {
+    if (NodeItem *item = nodes.value(id); item && item->definition.recordsWaveform && !item->ports(true).isEmpty()) {
         changedViewports.insert(id);
         if (!waveformPublishTimer.isActive())
             waveformPublishTimer.start();
@@ -1169,7 +1181,7 @@ void Canvas::updateWire(const QPoint &position)
     const QPointF start = item->mapToScene(item->portPosition(output, wireStart->endpoint.port));
     const QPointF end = mapToScene(position);
     const auto *port = item->port(output, wireStart->endpoint.port);
-    const QColor color = target && !wireError(*target).isEmpty() ? colors.error : portColor(port->type, colors);
+    const QColor color = target && !wireError(*target).isEmpty() ? colors.error : portColor(port->type, colors, port->id);
     draftWire->setPen(QPen(color, 2, Qt::DashLine, Qt::RoundCap));
     draftWire->setPath(output ? wirePath(start, end) : wirePath(end, start));
 }

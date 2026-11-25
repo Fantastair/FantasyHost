@@ -697,6 +697,8 @@ void MainWindow::refreshInspector()
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     for (const ParameterDefinition &parameter : definition.parameters) {
+        if (definition.displaysSpectrum && parameter.id == "channels" && node->parameters.value("inputLayout") != "ports")
+            continue;
         const QJsonValue current = node->parameters.value(parameter.id);
         QWidget *editor = nullptr;
         if (parameter.kind == ParameterKind::TextTemplate) {
@@ -1079,6 +1081,8 @@ void MainWindow::setParameter(const QUuid &id, const QString &parameter, const Q
     }
     if (parameter == "rxFormat" || parameter == "txFormat")
         refreshSerialPreview();
+    if (inspectedNode == id && node.type == "spectrum" && parameter == "inputLayout")
+        QTimer::singleShot(0, this, [this, id] { if (id == inspectedNode) refreshInspector(); });
     if (!removed.isEmpty()) {
         runner.sync(graph);
         statusBar()->showMessage(QString("已移除 %1 条不再对应输入端口的连线。").arg(removed.size()), 6500);

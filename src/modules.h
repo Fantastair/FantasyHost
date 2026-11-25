@@ -13,11 +13,13 @@
 class WaveformViewport;
 struct SpectrumFrame;
 
-enum class DataType { Bytes, Number, Waveform, Any };
+enum class DataType { Bytes, Number, Waveform, WaveformChannel, Any };
 enum class ParameterKind { Number, SerialPort, Choice, TextTemplate };
 using WaveformPacket = std::shared_ptr<const WaveformViewport>;
 using Packet = std::variant<QByteArray, double, WaveformPacket>;
 inline const QString waveformViewportPort = QStringLiteral("viewport");
+QString channelPortId(int channel);
+int channelPortIndex(const QString &id);
 
 struct PortDefinition {
     QString id;

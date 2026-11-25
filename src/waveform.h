@@ -91,6 +91,8 @@ class WaveformViewport {
 public:
     WaveformView view() const { return range; }
     int channelCount() const { return channels; }
+    int firstSourceChannel() const { return sourceOffset; }
+    std::shared_ptr<const WaveformViewport> singleChannel(int channel) const;
     qint64 sampleCount(int channel) const;
     bool sameSamples(const WaveformViewport &other, int channel) const;
     QList<QPointF> readChannel(int channel, qint64 offset, qsizetype count) const;
@@ -106,6 +108,7 @@ private:
     std::array<Channel, maxScopeChannels> tracks;
     WaveformView range;
     int channels = 0;
+    int sourceOffset = 0;
 };
 
 class WaveformCsvSnapshot {

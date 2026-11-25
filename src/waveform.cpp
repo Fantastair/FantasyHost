@@ -166,6 +166,18 @@ qint64 WaveformViewport::sampleCount(int channel) const
     return channel >= 0 && channel < channels ? tracks[channel].count : 0;
 }
 
+std::shared_ptr<const WaveformViewport> WaveformViewport::singleChannel(int channel) const
+{
+    if (channel < 0 || channel >= channels)
+        return {};
+    auto result = std::make_shared<WaveformViewport>();
+    result->range = range;
+    result->channels = 1;
+    result->sourceOffset = sourceOffset + channel;
+    result->tracks[0] = tracks[channel];
+    return result;
+}
+
 bool WaveformViewport::sameSamples(const WaveformViewport &other, int channel) const
 {
     const qint64 count = sampleCount(channel);

@@ -279,8 +279,8 @@ QList<PortDefinition> scopeInputs(const QJsonObject &parameters)
     if (parameters.value("layout").toString() == "frame")
         return {{"ch1", "多通道帧", DataType::Bytes}};
     QList<PortDefinition> ports;
-    for (int i = 1; i <= scopeChannels(parameters); ++i)
-        ports.append({QString("ch%1").arg(i), QString("CH%1").arg(i), DataType::Bytes});
+    for (int channel = 0; channel < scopeChannels(parameters); ++channel)
+        ports.append({channelPortId(channel), QString("CH%1").arg(channel + 1), DataType::Bytes});
     return ports;
 }
 
@@ -298,9 +298,15 @@ ParameterDefinition number(const QString &id, const QString &label, double initi
 
 QList<PortDefinition> recorderOutputs(const QJsonObject &parameters)
 {
-    if (parameters.value("viewportOutput") == "on")
-        return {{waveformViewportPort, "视口波形", DataType::Waveform}};
-    return {};
+    QList<PortDefinition> outputs;
+    const auto mode = parameters.value("viewportOutput");
+    if (mode == "on" || mode == "both")
+        outputs.append({waveformViewportPort, "视口波形", DataType::Waveform});
+    if (mode == "channels" || mode == "both") {
+        for (int channel = 0; channel < scopeChannels(parameters); ++channel)
+            outputs.append({channelPortId(channel), QString("CH%1").arg(channel + 1), DataType::WaveformChannel});
+    }
+    return outputs;
 }
 
 QList<ParameterDefinition> waveformInputParameters()
@@ -328,6 +334,16 @@ void Module::setParameters(const QJsonObject &values)
         parameters = values;
         parametersChanged(previous);
     }
+}
+
+QString channelPortId(int channel) { return QString("ch%1").arg(channel + 1); }
+
+int channelPortIndex(const QString &id)
+{
+    if (id.size() != 3 || !id.startsWith("ch"))
+        return -1;
+    const int channel = id.at(2).unicode() - '1';
+    return channel >= 0 && channel < maxScopeChannels ? channel : -1;
 }
 
 const QList<ModuleDefinition> &moduleDefinitions()
@@ -358,7 +374,8 @@ const QList<ModuleDefinition> &moduleDefinitions()
         }, &create<ScopeInput>, &scopeInputs, true},
         {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters() + QList<ParameterDefinition>{
             choice("viewLayout", "显示布局", "overlay", {{"overlay", "叠加通道"}, {"separate", "分离通道"}}, true),
-            choice("viewportOutput", "视口输出", "off", {{"off", "关闭"}, {"on", "开启"}}, true, true),
+            choice("viewportOutput", "视口输出", "off", {{"off", "关闭"}, {"on", "合并多通道"},
+                {"channels", "逐通道输出"}, {"both", "合并与逐通道"}}, true, true),
         },
          &create<ScopeInput>, &scopeInputs, false, false, false, true, &recorderOutputs},
         spectrumDefinition(),

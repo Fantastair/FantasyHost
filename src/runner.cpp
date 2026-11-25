@@ -1,5 +1,6 @@
 #include "runner.h"
 #include "spectrum.h"
+#include "waveform.h"
 
 #include <QSet>
 #include <QTimer>
@@ -35,7 +36,7 @@ void GraphRunner::sync(const Graph &graph)
     for (const Connection &edge : graph.connections()) {
         if (!connections.contains(edge.id)) {
             resetInput(edge.to);
-            if (edge.from.port == waveformViewportPort)
+            if (moduleDefinition(graph.node(edge.from.node)->type)->recordsWaveform)
                 waveformSources.insert(edge.from.node);
         }
         routes.insert(edge.from.node, edge);
@@ -128,7 +129,7 @@ bool GraphRunner::hasWaveformReceivers(const QUuid &id) const
 {
     const auto range = routes.equal_range(id);
     for (auto route = range.first; route != range.second; ++route) {
-        if (route->from.port == waveformViewportPort)
+        if (route->from.port == waveformViewportPort || channelPortIndex(route->from.port) >= 0)
             return true;
     }
     return false;
@@ -136,7 +137,17 @@ bool GraphRunner::hasWaveformReceivers(const QUuid &id) const
 
 void GraphRunner::publishWaveform(const QUuid &id, const WaveformPacket &packet)
 {
-    publish(id, waveformViewportPort, packet);
+    QSet<QString> outputs;
+    const auto range = routes.equal_range(id);
+    for (auto route = range.first; route != range.second; ++route)
+        outputs.insert(route->from.port);
+    if (outputs.contains(waveformViewportPort))
+        publish(id, waveformViewportPort, packet);
+    for (int channel = 0; channel < maxScopeChannels; ++channel) {
+        const QString port = channelPortId(channel);
+        if (outputs.contains(port))
+            publish(id, port, packet ? packet->singleChannel(channel) : WaveformPacket{});
+    }
 }
 
 bool GraphRunner::sendManual(const QUuid &id, const QString &text, QString &error)

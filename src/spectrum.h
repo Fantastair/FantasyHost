@@ -8,13 +8,19 @@
 class QPainter;
 struct ThemeColors;
 
-struct SpectrumFrame {
+struct SpectrumTrace {
+    int channel = 0;
     QList<QPointF> bins;
     QString status;
     double frequencyLimit = 0;
     double binWidth = 0;
     QPointF peak;
     qsizetype samples = 0;
+};
+
+struct SpectrumFrame {
+    QList<SpectrumTrace> traces;
+    QString status;
     bool decibels = false;
 };
 
