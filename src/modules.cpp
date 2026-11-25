@@ -1,5 +1,6 @@
 #include "modules.h"
 
+#include "filter.h"
 #include "scope.h"
 #include "spectrum.h"
 #include "textdisplay.h"
@@ -378,6 +379,7 @@ const QList<ModuleDefinition> &moduleDefinitions()
                 {"channels", "逐通道输出"}, {"both", "合并与逐通道"}}, true, true),
         },
          &create<ScopeInput>, &scopeInputs, false, false, false, true, &recorderOutputs},
+        filterDefinition(),
         spectrumDefinition(),
         textDisplayDefinition(),
     };

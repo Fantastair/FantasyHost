@@ -231,6 +231,9 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
         p.drawLine(QPointF(12, 11), QPointF(12, 7));
         p.drawLine(QPointF(15, 11), QPointF(15, 9));
         break;
+    case WorkspaceIcon::Filter:
+        polyline({{3, 4}, {15, 4}, {11, 9}, {11, 13}, {7, 15}, {7, 9}, {3, 4}});
+        break;
     case WorkspaceIcon::Text:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
         p.drawLine(QPointF(5, 7), QPointF(13, 7));

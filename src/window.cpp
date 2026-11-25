@@ -59,6 +59,7 @@ const QMap<QString, WorkspaceIcon> moduleIcons{
     {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform},
     {"recorder", WorkspaceIcon::Recorder}, {"text", WorkspaceIcon::Text},
     {"spectrum", WorkspaceIcon::Spectrum},
+    {"filter", WorkspaceIcon::Filter},
 };
 
 #ifdef Q_OS_WIN
@@ -697,8 +698,17 @@ void MainWindow::refreshInspector()
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     for (const ParameterDefinition &parameter : definition.parameters) {
-        if (definition.displaysSpectrum && parameter.id == "channels" && node->parameters.value("inputLayout") != "ports")
+        if ((definition.displaysSpectrum || definition.id == "filter") && parameter.id == "channels"
+            && node->parameters.value("inputLayout") != "ports")
             continue;
+        if (definition.id == "filter") {
+            const QString mode = node->parameters.value("filterMode").toString();
+            const bool band = mode == "bandpass" || mode == "bandstop";
+            if (((band || mode == "bypass") && parameter.id == "cutoff")
+                || (!band && (parameter.id == "bandLow" || parameter.id == "bandHigh"))
+                || (mode == "bypass" && parameter.id == "tapCount"))
+                continue;
+        }
         const QJsonValue current = node->parameters.value(parameter.id);
         QWidget *editor = nullptr;
         if (parameter.kind == ParameterKind::TextTemplate) {
@@ -1081,7 +1091,9 @@ void MainWindow::setParameter(const QUuid &id, const QString &parameter, const Q
     }
     if (parameter == "rxFormat" || parameter == "txFormat")
         refreshSerialPreview();
-    if (inspectedNode == id && node.type == "spectrum" && parameter == "inputLayout")
+    const bool changesInspectorFields = ((node.type == "spectrum" || node.type == "filter") && parameter == "inputLayout")
+        || (node.type == "filter" && parameter == "filterMode");
+    if (inspectedNode == id && changesInspectorFields)
         QTimer::singleShot(0, this, [this, id] { if (id == inspectedNode) refreshInspector(); });
     if (!removed.isEmpty()) {
         runner.sync(graph);

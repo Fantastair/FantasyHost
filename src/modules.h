@@ -63,6 +63,7 @@ public:
     virtual void close() {}
     virtual void receive(const QString &, const Packet &) {}
     virtual void resetInput(const QString &) {}
+    virtual std::optional<Packet> currentOutput(const QString &) const { return std::nullopt; }
     virtual bool sendManual(const QString &, QString &error) { error = "此模块不支持手动发送。"; return false; }
     void setParameters(const QJsonObject &values);
 

@@ -26,22 +26,39 @@ void GraphRunner::sync(const Graph &graph)
             add(node);
     }
 
-    // A fragment from the previous source must not become part of a new stream.
+    QMultiHash<QUuid, QString> inputsToReset;
+    QMultiHash<QUuid, QString> outputsToReplay;
+    const auto addEndpoint = [](QMultiHash<QUuid, QString> &endpoints, const Endpoint &endpoint) {
+        if (!endpoints.contains(endpoint.node, endpoint.port))
+            endpoints.insert(endpoint.node, endpoint.port);
+    };
+    // Install routes before resetting inputs, since a reset can propagate through a filter.
     for (const Connection &edge : connections) {
         if (!graph.connections().contains(edge.id))
-            resetInput(edge.to);
+            addEndpoint(inputsToReset, edge.to);
     }
     routes.clear();
     QSet<QUuid> waveformSources;
     for (const Connection &edge : graph.connections()) {
         if (!connections.contains(edge.id)) {
-            resetInput(edge.to);
+            addEndpoint(inputsToReset, edge.to);
             if (moduleDefinition(graph.node(edge.from.node)->type)->recordsWaveform)
                 waveformSources.insert(edge.from.node);
+            else
+                addEndpoint(outputsToReplay, edge.from);
         }
         routes.insert(edge.from.node, edge);
     }
     connections = graph.connections();
+    for (auto target = inputsToReset.cbegin(); target != inputsToReset.cend(); ++target)
+        resetInput({target.key(), target.value()});
+    for (auto source = outputsToReplay.cbegin(); source != outputsToReplay.cend(); ++source) {
+        const auto entry = modules.find(source.key());
+        if (entry != modules.end() && entry->second.active && !entry->second.closing) {
+            if (const auto packet = entry->second.module->currentOutput(source.value()))
+                publish(source.key(), source.value(), *packet);
+        }
+    }
     for (const QUuid &source : waveformSources)
         Q_EMIT waveformRequested(source);
 }
@@ -59,9 +76,9 @@ void GraphRunner::add(const Node &node)
         [this, id](const QString &text) { Q_EMIT textReceived(id, text); },
         [this, id](const SpectrumFrame &frame) { Q_EMIT spectrumReceived(id, frame); },
     });
+    setStatus(id, definition.manualOpen ? "串口已关闭" : "等待输入");
     module->setParameters(node.parameters);
     modules.emplace(id, Entry{std::move(module), definition.manualOpen, !definition.manualOpen});
-    setStatus(id, definition.manualOpen ? "串口已关闭" : "等待输入");
 }
 
 void GraphRunner::reset()

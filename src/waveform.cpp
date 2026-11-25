@@ -156,7 +156,7 @@ std::shared_ptr<const WaveformViewport> WaveformRecording::viewport(WaveformView
         const qint64 first = sampleBoundary(series, view.time.low, false);
         const qint64 end = sampleBoundary(series, view.time.high, true);
         if (end > first)
-            result->tracks[channel] = {series.file, series.file->fileName(), first, end - first};
+            result->tracks[channel] = {series.file, series.file->fileName(), first, end - first, {}};
     }
     return result;
 }
@@ -178,13 +178,30 @@ std::shared_ptr<const WaveformViewport> WaveformViewport::singleChannel(int chan
     return result;
 }
 
+std::shared_ptr<const WaveformViewport> WaveformViewport::withChannelReaders(const std::array<Reader, maxScopeChannels> &readers) const
+{
+    auto result = std::make_shared<WaveformViewport>();
+    result->range = range;
+    result->channels = channels;
+    result->sourceOffset = sourceOffset;
+    for (int channel = 0; channel < channels; ++channel) {
+        if (readers[channel])
+            result->tracks[channel] = {{}, {}, 0, tracks[channel].count, readers[channel]};
+    }
+    return result;
+}
+
 bool WaveformViewport::sameSamples(const WaveformViewport &other, int channel) const
 {
     const qint64 count = sampleCount(channel);
     if (!count)
         return other.sampleCount(channel) == 0;
-    return count == other.sampleCount(channel) && tracks[channel].storage == other.tracks[channel].storage
-        && tracks[channel].first == other.tracks[channel].first;
+    if (count != other.sampleCount(channel))
+        return false;
+    const Channel &left = tracks[channel];
+    const Channel &right = other.tracks[channel];
+    return left.reader || right.reader ? left.reader == right.reader
+                                       : left.storage == right.storage && left.first == right.first;
 }
 
 QList<QPointF> WaveformViewport::readChannel(int channel, qint64 offset, qsizetype count) const
@@ -194,6 +211,8 @@ QList<QPointF> WaveformViewport::readChannel(int channel, qint64 offset, qsizety
         return {};
     const Channel &series = tracks[channel];
     const qint64 length = std::min<qint64>({count, series.count - offset, std::numeric_limits<qsizetype>::max() / sizeof(Sample)});
+    if (series.reader)
+        return (*series.reader)(offset, length);
     QFile file(series.path);
     if (!file.open(QIODevice::ReadOnly) || !file.seek((series.first + offset) * sizeof(Sample)))
         return {};

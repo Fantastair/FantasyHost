@@ -4,6 +4,7 @@
 
 #include <QRectF>
 #include <QTemporaryFile>
+#include <functional>
 #include <memory>
 
 class QColor;
@@ -89,10 +90,14 @@ private:
 // A stable time slice of the original samples. Consumers can read each channel in chunks.
 class WaveformViewport {
 public:
+    using ReadSamples = std::function<QList<QPointF>(qint64, qsizetype)>;
+    using Reader = std::shared_ptr<const ReadSamples>;
+
     WaveformView view() const { return range; }
     int channelCount() const { return channels; }
     int firstSourceChannel() const { return sourceOffset; }
     std::shared_ptr<const WaveformViewport> singleChannel(int channel) const;
+    std::shared_ptr<const WaveformViewport> withChannelReaders(const std::array<Reader, maxScopeChannels> &readers) const;
     qint64 sampleCount(int channel) const;
     bool sameSamples(const WaveformViewport &other, int channel) const;
     QList<QPointF> readChannel(int channel, qint64 offset, qsizetype count) const;
@@ -104,6 +109,7 @@ private:
         QString path;
         qint64 first = 0;
         qint64 count = 0;
+        Reader reader;
     };
     std::array<Channel, maxScopeChannels> tracks;
     WaveformView range;

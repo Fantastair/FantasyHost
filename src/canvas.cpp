@@ -254,7 +254,7 @@ public:
             paintSpectrum(*painter, recordingChart(), spectrum, colors);
         else if (!definition.displaysText) {
             painter->setPen(failed ? colors.error : colors.muted);
-            const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
+            const QString label = shownStatus.isEmpty() ? (definition.manualOpen ? QString("串口已关闭") : QString("等待输入")) : shownStatus;
             painter->drawText(QRectF(14, lowestPort(inputPorts.size(), outputPorts.size()) + 16, cardWidth - 28, 22),
                               Qt::AlignLeft | Qt::AlignVCenter, painter->fontMetrics().elidedText(label, Qt::ElideRight, cardWidth - 28));
         }
