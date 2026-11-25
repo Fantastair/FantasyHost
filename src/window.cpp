@@ -43,8 +43,11 @@
 #include <QThread>
 #include <QVBoxLayout>
 #include <QWindow>
+#include <memory>
 #ifdef Q_OS_WIN
+#include <QScopeGuard>
 #include <qt_windows.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 #endif
 
@@ -56,6 +59,60 @@ const QMap<QString, WorkspaceIcon> moduleIcons{
     {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform},
     {"recorder", WorkspaceIcon::Recorder}, {"text", WorkspaceIcon::Text},
 };
+
+#ifdef Q_OS_WIN
+struct ReleaseComObject {
+    void operator()(IUnknown *object) const { object->Release(); }
+};
+
+QString chooseWindowsExportFile(QWidget *parent, const QString &directory, const QString &caption, bool image, QString &error)
+{
+    const auto check = [&error](HRESULT result) {
+        if (SUCCEEDED(result))
+            return true;
+        if (result != HRESULT_FROM_WIN32(ERROR_CANCELLED))
+            error = QString("Windows 保存对话框出错（0x%1）。").arg(quint32(result), 8, 16, QLatin1Char('0'));
+        return false;
+    };
+    if (!check(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)))
+        return {};
+    const auto uninitialize = qScopeGuard([] { CoUninitialize(); });
+
+    IFileSaveDialog *nativeDialog = nullptr;
+    if (!check(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&nativeDialog))))
+        return {};
+    const std::unique_ptr<IFileSaveDialog, ReleaseComObject> dialog(nativeDialog);
+    // The atomic writer checks access when it creates the actual export.
+    constexpr DWORD options = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT | FOS_NOCHANGEDIR | FOS_NOTESTFILECREATE;
+    const COMDLG_FILTERSPEC filter = image ? COMDLG_FILTERSPEC{L"PNG 图像 (*.png)", L"*.png"}
+                                          : COMDLG_FILTERSPEC{L"CSV 文件 (*.csv)", L"*.csv"};
+    if (!check(dialog->SetOptions(options)) || !check(dialog->SetTitle(caption.toStdWString().c_str()))
+        || !check(dialog->SetFileTypes(1, &filter)) || !check(dialog->SetFileTypeIndex(1))
+        || !check(dialog->SetDefaultExtension(image ? L"png" : L"csv"))
+        || !check(dialog->SetFileName(image ? L"waveform.png" : L"waveform.csv"))) {
+        return {};
+    }
+
+    IShellItem *folderItem = nullptr;
+    if (SUCCEEDED(SHCreateItemFromParsingName(QDir::toNativeSeparators(directory).toStdWString().c_str(), nullptr,
+                                             IID_PPV_ARGS(&folderItem)))) {
+        const std::unique_ptr<IShellItem, ReleaseComObject> folder(folderItem);
+        dialog->SetFolder(folder.get());
+    }
+    if (!check(dialog->Show(reinterpret_cast<HWND>(parent->winId()))))
+        return {};
+
+    IShellItem *selectedItem = nullptr;
+    if (!check(dialog->GetResult(&selectedItem)))
+        return {};
+    const std::unique_ptr<IShellItem, ReleaseComObject> selected(selectedItem);
+    PWSTR path = nullptr;
+    if (!check(selected->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+        return {};
+    const auto freePath = qScopeGuard([path] { CoTaskMemFree(path); });
+    return QDir::fromNativeSeparators(QString::fromWCharArray(path));
+}
+#endif
 
 void showNodeStatus(QLabel &label, const QString &status)
 {
@@ -912,30 +969,30 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
 
 void MainWindow::exportRecording(const QUuid &id, bool image)
 {
-    const QString suffix = image ? "png" : "csv";
     QString directory = recordingExportDirectory;
     if (!QFileInfo(directory).isDir())
         directory = QStandardPaths::writableLocation(image ? QStandardPaths::PicturesLocation : QStandardPaths::DocumentsLocation);
     if (!QFileInfo(directory).isDir())
         directory = QDir::homePath();
 
-    QFileDialog dialog(this);
-    // Let the export itself check write access instead of the Windows Shell save dialog.
-    dialog.setOption(QFileDialog::DontUseNativeDialog);
-    dialog.setWindowTitle(image ? "导出当前波形视图" : "导出全部波形数据");
+    const QString caption = image ? "导出当前波形视图" : "导出全部波形数据";
+    QString path;
+#ifdef Q_OS_WIN
+    QString dialogError;
+    path = chooseWindowsExportFile(this, directory, caption, image, dialogError);
+    if (!dialogError.isEmpty())
+        QMessageBox::warning(this, "无法导出波形", dialogError);
+#else
+    const QString suffix = image ? "png" : "csv";
+    QFileDialog dialog(this, caption, directory, image ? "PNG 图像 (*.png)" : "CSV 文件 (*.csv)");
     dialog.setAcceptMode(QFileDialog::AcceptSave);
-    dialog.setNameFilter(image ? "PNG 图像 (*.png)" : "CSV 文件 (*.csv)");
-    dialog.setLabelText(QFileDialog::LookIn, "保存位置");
-    dialog.setLabelText(QFileDialog::FileName, "文件名");
-    dialog.setLabelText(QFileDialog::FileType, "文件类型");
-    dialog.setLabelText(QFileDialog::Accept, "保存");
-    dialog.setLabelText(QFileDialog::Reject, "取消");
-    dialog.setDirectory(directory);
     dialog.setDefaultSuffix(suffix);
     dialog.selectFile("waveform." + suffix);
-    if (!dialog.exec())
+    if (dialog.exec())
+        path = dialog.selectedFiles().value(0);
+#endif
+    if (path.isEmpty())
         return;
-    const QString path = dialog.selectedFiles().first();
     const QFileInfo target(path);
     recordingExportDirectory = target.absolutePath();
     QString destination = QDir::cleanPath(target.absoluteFilePath());
