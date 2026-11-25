@@ -94,6 +94,8 @@ QString workspaceStyle(const ThemeColors &colors)
         QToolBar#projectToolbar QToolButton:focus, QWidget#dockHeader QToolButton:focus,
         QPushButton:focus, QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid @accent; }
         QPushButton { background: @card; border-color: @border; padding: 5px 9px; min-height: 19px; }
+        QPushButton#followRecording:checked { background: @selection; color: @accent; border-color: @accent; }
+        QPushButton#followRecording:checked:hover { color: @accentHover; border-color: @accentHover; }
         QPushButton#serialToggle[portOpen="false"], QPushButton#applyTextTemplate:enabled { background: @accent; color: @onAccent; border-color: @accent; }
         QPushButton#serialToggle[portOpen="false"]:hover, QPushButton#applyTextTemplate:enabled:hover { background: @accentHover; }
         QPushButton#serialToggle[portOpen="false"]:focus, QPushButton#applyTextTemplate:enabled:focus { border-color: @onAccent; }

@@ -100,6 +100,16 @@ WaveformView WaveformRecording::bounds() const
     return {{0, time}, {minimum - pad, maximum + pad}};
 }
 
+double WaveformRecording::latestTime() const
+{
+    double time = 0;
+    for (const Series &series : tracks) {
+        if (series.samples)
+            time = std::max(time, series.blocks.last().lastTime);
+    }
+    return time;
+}
+
 qint64 WaveformRecording::sampleCount() const
 {
     qint64 total = 0;

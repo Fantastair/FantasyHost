@@ -41,6 +41,7 @@ constexpr qreal textPaddingX = 14;
 constexpr qreal textPaddingY = 9;
 constexpr qreal textPortTop = 21;
 constexpr qreal maxTextWidth = 480;
+constexpr double initialRecordingSpan = 1.0;
 
 QFont displayFont()
 {
@@ -349,8 +350,20 @@ public:
     const ModuleDefinition &definition;
     bool failed = false;
     std::function<void(QPointF)> moved;
+    std::function<void(bool)> recordingFollowChanged;
 
     qint64 recordingSamples() const { return recording ? recording->sampleCount() : 0; }
+    bool recordingFollowing() const { return recording && followLatest; }
+
+    bool setRecordingFollowing(bool following)
+    {
+        if (!recording || followLatest == following)
+            return false;
+        followLatest = following;
+        if (recordingFollowChanged)
+            recordingFollowChanged(following);
+        return true;
+    }
 
     WaveformHit recordingHit(QPointF position) const
     {
@@ -371,11 +384,22 @@ public:
         refreshRecordingBounds();
         const WaveformView previous = recordingView;
         const QRectF plot = waveformPlotRect(recordingChart(), recordingLanes(), hit.lane);
-        const QPointF anchor((position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height());
         const bool time = hit.region == WaveformRegion::TimeAxis;
-        adjustWaveformView(recordingView, recordingLimits, time ? (pan ? WaveformGesture::PanTime : WaveformGesture::ZoomTime)
-                                                                : (pan ? WaveformGesture::PanValue : WaveformGesture::ZoomValue),
+        const bool zoomingLive = time && !pan && followLatest;
+        const QPointF anchor(zoomingLive ? 1.0 : (position.x() - plot.left()) / plot.width(),
+                             (plot.bottom() - position.y()) / plot.height());
+        auto limits = recordingGestureLimits();
+        if (zoomingLive)
+            limits.time.high = std::max(limits.time.high, initialRecordingSpan);
+        adjustWaveformView(recordingView, limits, time ? (pan ? WaveformGesture::PanTime : WaveformGesture::ZoomTime)
+                                                      : (pan ? WaveformGesture::PanValue : WaveformGesture::ZoomValue),
                            steps, anchor);
+        if (time && !(recordingView.time == previous.time)) {
+            if (pan)
+                setRecordingFollowing(false);
+            else
+                liveTimeSpan = recordingView.time.span();
+        }
         return finishRecordingMove(previous);
     }
 
@@ -385,13 +409,16 @@ public:
         const WaveformView previous = recordingView;
         const QRectF plot = waveformPlotRect(recordingChart(), recordingLanes(), std::min(hit.lane, recordingLanes() - 1));
         const double fraction = hit.region == WaveformRegion::TimeAxis ? -delta.x() / plot.width() : delta.y() / plot.height();
-        panWaveformAxis(recordingView, recordingLimits, hit.region, fraction);
+        panWaveformAxis(recordingView, recordingGestureLimits(), hit.region, fraction);
+        if (hit.region == WaveformRegion::TimeAxis && !(recordingView.time == previous.time))
+            setRecordingFollowing(false);
         return finishRecordingMove(previous);
     }
 
     void fitRecording()
     {
         if (recording) {
+            setRecordingFollowing(false);
             recordingView = recordingLimits = recording->bounds();
             refreshRecordingFrame();
             update();
@@ -402,6 +429,7 @@ public:
     {
         recording->clear();
         recordingView = recordingLimits = {};
+        setRecordingFollowing(true);
         failed = false;
         applySettings(node);
     }
@@ -454,6 +482,13 @@ private:
     int recordingChannels() const { return std::max(configuredChannels, recording->channelCount()); }
     int recordingLanes() const { return recordingLayout == WaveformLayout::Separate ? recordingChannels() : 1; }
 
+    WaveformView recordingGestureLimits() const
+    {
+        WaveformView limits = recordingLimits;
+        limits.time.high = std::max(recording->latestTime(), recordingView.time.high);
+        return limits;
+    }
+
     bool finishRecordingMove(const WaveformView &previous)
     {
         if (recordingView == previous)
@@ -466,17 +501,19 @@ private:
     void refreshRecordingBounds()
     {
         const WaveformView next = recording->bounds();
-        const auto adjust = [](WaveformRange &view, WaveformRange previous, WaveformRange limit) {
-            if (view == previous || view.span() >= limit.span()) {
-                view = limit;
-            } else if (view.low < limit.low || view.high > limit.high) {
-                const double span = view.span();
-                view.low = std::clamp(view.low, limit.low, std::max(limit.low, limit.high - span));
-                view.high = std::min(limit.high, view.low + span);
-            }
-        };
-        adjust(recordingView.time, recordingLimits.time, next.time);
-        adjust(recordingView.value, recordingLimits.value, next.value);
+        if (followLatest) {
+            const double right = std::max(liveTimeSpan, recording->latestTime());
+            const double left = std::min(right - liveTimeSpan, std::nextafter(right, 0.0));
+            recordingView.time = {left, right};
+        }
+        auto &value = recordingView.value;
+        if (value == recordingLimits.value || value.span() >= next.value.span()) {
+            value = next.value;
+        } else if (value.low < next.value.low || value.high > next.value.high) {
+            const double span = value.span();
+            value.low = std::clamp(value.low, next.value.low, std::max(next.value.low, next.value.high - span));
+            value.high = std::min(next.value.high, value.low + span);
+        }
         recordingLimits = next;
     }
 
@@ -589,6 +626,8 @@ private:
     std::unique_ptr<WaveformRecording> recording;
     WaveformView recordingView;
     WaveformView recordingLimits;
+    bool followLatest = true;
+    double liveTimeSpan = initialRecordingSpan;
     WaveformFrame recordingFrame;
     WaveformLayout recordingLayout = WaveformLayout::Overlay;
     WaveformHover recordingHover;
@@ -785,6 +824,8 @@ void Canvas::addModuleAt(const QString &type, QPointF position)
 void Canvas::addNodeItem(const Node &node)
 {
     auto *item = new NodeItem(node, colors);
+    if (item->definition.recordsWaveform)
+        item->recordingFollowChanged = [this, id = node.id](bool following) { Q_EMIT recordingFollowChanged(id, following); };
     item->moved = [this, id = node.id](QPointF position) {
         graph.moveNode(id, position);
         updateEdges(id);
@@ -979,6 +1020,20 @@ qint64 Canvas::recordingSampleCount(const QUuid &id) const
 {
     const NodeItem *item = nodes.value(id);
     return item ? item->recordingSamples() : 0;
+}
+
+bool Canvas::recordingFollowing(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item && item->recordingFollowing();
+}
+
+void Canvas::setRecordingFollowing(const QUuid &id, bool following)
+{
+    if (NodeItem *item = nodes.value(id); item && item->setRecordingFollowing(following)) {
+        item->presentValues();
+        scheduleRecordingViewport(id);
+    }
 }
 
 void Canvas::fitRecording(const QUuid &id)

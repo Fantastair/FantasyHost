@@ -54,6 +54,7 @@ public:
     bool append(int channel, const QList<double> &values, int sampleRate, QString &error);
     void clear();
     WaveformView bounds() const;
+    double latestTime() const;
     qint64 sampleCount() const;
     int channelCount() const;
     QList<QPointF> trace(int channel, WaveformRange time, int columns) const;

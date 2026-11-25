@@ -36,6 +36,8 @@ public:
     void setScopePaused(const QUuid &id, bool paused);
     void rearmScope(const QUuid &id);
     qint64 recordingSampleCount(const QUuid &id) const;
+    bool recordingFollowing(const QUuid &id) const;
+    void setRecordingFollowing(const QUuid &id, bool following);
     void fitRecording(const QUuid &id);
     void clearRecording(const QUuid &id);
     WaveformCsvSnapshot recordingCsv(const QUuid &id) const;
@@ -54,6 +56,7 @@ Q_SIGNALS:
     void zoomChanged(double percent);
     void displayTextPresented(const QUuid &id, const QString &text);
     void recordingUpdated(const QUuid &id, qint64 samples);
+    void recordingFollowChanged(const QUuid &id, bool following);
     void recordingViewportChanged(const QUuid &id);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);

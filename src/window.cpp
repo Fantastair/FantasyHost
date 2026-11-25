@@ -937,9 +937,23 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
     layout->setSpacing(7);
     auto *samples = wrappedLabel({}, section);
     samples->setObjectName("recordedSamples");
-    layout->addWidget(samples);
+    auto *follow = new QPushButton("跟随最新", section);
+    follow->setObjectName("followRecording");
+    follow->setCheckable(true);
+    follow->setChecked(canvas->recordingFollowing(id));
+    follow->setToolTip("将时间窗保持在最新采样处。关闭后可回看历史。");
+    connect(follow, &QPushButton::clicked, canvas, [this, id](bool checked) { canvas->setRecordingFollowing(id, checked); });
+    connect(canvas, &Canvas::recordingFollowChanged, follow, [id, follow](const QUuid &node, bool following) {
+        if (node == id)
+            follow->setChecked(following);
+    });
+    auto *state = new QHBoxLayout;
+    state->addWidget(samples, 1);
+    state->addWidget(follow);
+    layout->addLayout(state);
     auto *fit = new QPushButton("显示全部数据", section);
     fit->setObjectName("fitRecording");
+    fit->setToolTip("显示当前全部记录并暂停跟随。");
     connect(fit, &QPushButton::clicked, canvas, [this, id] { canvas->fitRecording(id); });
     auto *clear = new QPushButton("清除记录", section);
     clear->setObjectName("clearRecording");
