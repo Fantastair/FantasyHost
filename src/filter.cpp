@@ -299,7 +299,7 @@ QList<PortDefinition> filterPorts(const QJsonObject &parameters, bool output)
 
 ModuleDefinition filterDefinition()
 {
-    return {"filter", "滤波器", "对当前视口的波形逐通道滤波，并输出处理后的采样。", {}, {}, {
+    return {"filter", "滤波器", "接在波形记录器（视口输出）和频谱分析仪之间，对当前视口的波形逐通道滤波并输出处理后的采样。", {}, {}, {
         {"inputLayout", "接线布局", ParameterKind::Choice, "frame", 0, 0, 0, true, true,
             {{"frame", "合并多通道"}, {"ports", "逐通道接线"}}},
         {"channels", "通道数", ParameterKind::Number, 2, 1, maxScopeChannels, 0, true, true, {}},

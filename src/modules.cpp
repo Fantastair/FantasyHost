@@ -375,7 +375,7 @@ const QList<ModuleDefinition> &moduleDefinitions()
         }, &create<ScopeInput>, &scopeInputs, true},
         {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters() + QList<ParameterDefinition>{
             choice("viewLayout", "显示布局", "overlay", {{"overlay", "叠加通道"}, {"separate", "分离通道"}}, true),
-            choice("viewportOutput", "视口输出", "off", {{"off", "关闭"}, {"on", "合并多通道"},
+            choice("viewportOutput", "视口输出", "on", {{"off", "关闭"}, {"on", "合并多通道"},
                 {"channels", "逐通道输出"}, {"both", "合并与逐通道"}}, true, true),
         },
          &create<ScopeInput>, &scopeInputs, false, false, false, true, &recorderOutputs},

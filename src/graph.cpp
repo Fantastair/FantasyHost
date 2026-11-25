@@ -135,8 +135,13 @@ QString Graph::connectionError(const Endpoint &from, const Endpoint &to, bool re
         return "请连接一个输出端口和一个输入端口。";
     const bool scalarInput = input->type == DataType::Any && (output->type == DataType::Bytes || output->type == DataType::Number);
     const bool singleToBundle = input->type == DataType::Waveform && output->type == DataType::WaveformChannel;
-    if (output->type != input->type && !scalarInput && !singleToBundle)
+    if (output->type != input->type && !scalarInput && !singleToBundle) {
+        if (input->type == DataType::Waveform)
+            return "该输入只接受「视口波形」：请接到波形记录器的视口波形输出或前一个滤波器的输出。";
+        if (output->type == DataType::Waveform)
+            return "「视口波形」只能接到频谱分析仪的波形输入，或下一个滤波器。";
         return "端口的数据类型不匹配。";
+    }
     if (from.node == to.node)
         return "端口必须属于不同的模块。";
 
