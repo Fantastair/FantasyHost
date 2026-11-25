@@ -58,6 +58,7 @@ constexpr qsizetype serialPreviewLimit = 16 * 1024;
 const QMap<QString, WorkspaceIcon> moduleIcons{
     {"serial", WorkspaceIcon::Serial}, {"scope", WorkspaceIcon::Waveform},
     {"recorder", WorkspaceIcon::Recorder}, {"text", WorkspaceIcon::Text},
+    {"spectrum", WorkspaceIcon::Spectrum},
 };
 
 #ifdef Q_OS_WIN
@@ -272,6 +273,13 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(&runner, &GraphRunner::samplesReceived, canvas, &Canvas::sample);
     connect(&runner, &GraphRunner::textReceived, canvas, &Canvas::setNodeDisplayText);
+    connect(&runner, &GraphRunner::spectrumReceived, canvas, &Canvas::setNodeSpectrum);
+    const auto publishViewport = [this](const QUuid &id) {
+        if (runner.hasWaveformReceivers(id))
+            runner.publishWaveform(id, canvas->recordingViewport(id));
+    };
+    connect(canvas, &Canvas::recordingViewportChanged, this, publishViewport);
+    connect(&runner, &GraphRunner::waveformRequested, this, publishViewport);
     connect(canvas, &Canvas::displayTextPresented, this, [this](const QUuid &id, const QString &text) {
         if (textDisplayPreview && id == inspectedNode)
             textDisplayPreview->setPlainText(text);
@@ -950,7 +958,7 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
     actions->addWidget(csv);
     actions->addWidget(png);
     layout->addLayout(actions);
-    layout->addWidget(wrappedLabel("滚轮缩放纵轴，Ctrl 平移纵轴。横向滚轮或 Shift 平移时间轴，Alt 缩放时间轴。", section));
+    layout->addWidget(wrappedLabel("轴区滚轮缩放，Shift + 滚轮或左键拖动平移。图内悬停可查看附近样本。", section));
 
     const auto update = [samples, fit, clear, csv, png](qint64 count) {
         samples->setText(QString("已记录 %1 个样本").arg(QLocale().toString(count)));

@@ -10,9 +10,14 @@
 #include <utility>
 #include <variant>
 
-enum class DataType { Bytes, Number, Any };
+class WaveformViewport;
+struct SpectrumFrame;
+
+enum class DataType { Bytes, Number, Waveform, Any };
 enum class ParameterKind { Number, SerialPort, Choice, TextTemplate };
-using Packet = std::variant<QByteArray, double>;
+using WaveformPacket = std::shared_ptr<const WaveformViewport>;
+using Packet = std::variant<QByteArray, double, WaveformPacket>;
+inline const QString waveformViewportPort = QStringLiteral("viewport");
 
 struct PortDefinition {
     QString id;
@@ -46,6 +51,7 @@ struct ModuleCallbacks {
     std::function<void(const QByteArray &)> received;
     std::function<void(const QString &)> fail;
     std::function<void(const QString &)> displayText;
+    std::function<void(const SpectrumFrame &)> displaySpectrum;
 };
 
 class Module {
@@ -78,6 +84,10 @@ struct ModuleDefinition {
     bool manualOpen = false;
     bool displaysText = false;
     bool recordsWaveform = false;
+    QList<PortDefinition> (*dynamicOutputs)(const QJsonObject &) = nullptr;
+    bool displaysSpectrum = false;
+
+    bool resizable() const { return scope || recordsWaveform || displaysSpectrum; }
 };
 
 const QList<ModuleDefinition> &moduleDefinitions();

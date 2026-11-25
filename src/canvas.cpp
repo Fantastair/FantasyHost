@@ -1,5 +1,6 @@
 #include "canvas.h"
 #include "scope.h"
+#include "spectrum.h"
 #include "waveform.h"
 
 #include <QApplication>
@@ -56,20 +57,22 @@ qreal lowestPort(qsizetype inputs, qsizetype outputs)
 
 QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameters, QSizeF customSize = {})
 {
-    if (definition.scope || definition.recordsWaveform) {
+    if (definition.resizable()) {
         if (customSize.isValid())
             return customSize;
+        if (definition.displaysSpectrum)
+            return {436, 277};
         return definition.recordsWaveform ? QSizeF(488, 317) : QSizeF(352, 248);
     }
     if (definition.displaysText)
         return {92, 42};
-    const qreal last = lowestPort(modulePorts(definition, parameters, false).size(), definition.outputs.size());
+    const qreal last = lowestPort(modulePorts(definition, parameters, false).size(), modulePorts(definition, parameters, true).size());
     return {234, last + 47};
 }
 
 QColor portColor(DataType type, const ThemeColors &colors)
 {
-    if (type == DataType::Any)
+    if (type == DataType::Any || type == DataType::Waveform)
         return colors.accent;
     return type == DataType::Number ? colors.number : colors.bytes;
 }
@@ -155,7 +158,7 @@ public:
         return path;
     }
 
-    const QList<PortDefinition> &ports(bool output) const { return output ? definition.outputs : inputPorts; }
+    const QList<PortDefinition> &ports(bool output) const { return output ? outputPorts : inputPorts; }
 
     const PortDefinition *port(bool output, const QString &id) const
     {
@@ -170,8 +173,10 @@ public:
     {
         const auto &list = ports(output);
         for (qsizetype index = 0; index < list.size(); ++index) {
-            if (list.at(index).id == id)
-                return {output ? dimensions.width() : 0, (definition.displaysText ? textPortTop : portTop) + portSpacing * index};
+            if (list.at(index).id == id) {
+                const qreal top = definition.displaysText ? textPortTop : output && recording ? 20 : portTop;
+                return {output ? dimensions.width() : 0, top + portSpacing * index};
+            }
         }
         return {};
     }
@@ -208,7 +213,7 @@ public:
             if (failed) {
                 painter->setPen(Qt::NoPen);
                 painter->setBrush(colors.error);
-                painter->drawEllipse(QPointF(cardWidth - 17, 20), 3.5, 3.5);
+                painter->drawEllipse(QPointF(cardWidth - (recording && !outputPorts.isEmpty() ? 102 : 17), 20), 3.5, 3.5);
             }
             painter->setPen(colors.border);
             painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
@@ -227,7 +232,7 @@ public:
                 if (definition.displaysText)
                     continue;
                 painter->setPen(colors.muted);
-                const qreal labelWidth = (capture || recording) && !output ? chartLeft() - 16 : cardWidth / 2 - 13;
+                const qreal labelWidth = resizable() && !output ? chartLeft() - 16 : cardWidth / 2 - 13;
                 const QRectF label(output ? cardWidth / 2 : 12, position.y() - 9, labelWidth, 18);
                 painter->drawText(label, Qt::AlignVCenter | (output ? Qt::AlignRight : Qt::AlignLeft),
                                   painter->fontMetrics().elidedText(port.label, Qt::ElideRight, label.width()));
@@ -237,11 +242,13 @@ public:
         if (capture)
             paintPlot(*painter);
         else if (recording)
-            paintWaveform(*painter, recordingChart(), recordingFrame, recordingLayout, colors);
+            paintWaveform(*painter, recordingChart(), recordingFrame, recordingLayout, colors, recordingHover);
+        else if (definition.displaysSpectrum)
+            paintSpectrum(*painter, recordingChart(), spectrum, colors);
         else if (!definition.displaysText) {
             painter->setPen(failed ? colors.error : colors.muted);
             const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
-            painter->drawText(QRectF(14, lowestPort(inputPorts.size(), definition.outputs.size()) + 16, cardWidth - 28, 22),
+            painter->drawText(QRectF(14, lowestPort(inputPorts.size(), outputPorts.size()) + 16, cardWidth - 28, 22),
                               Qt::AlignLeft | Qt::AlignVCenter, painter->fontMetrics().elidedText(label, Qt::ElideRight, cardWidth - 28));
         }
         if (resizable()) {
@@ -255,11 +262,13 @@ public:
     bool applySettings(const Node &node)
     {
         const auto nextPorts = modulePorts(definition, node.parameters, false);
+        const auto nextOutputs = modulePorts(definition, node.parameters, true);
         const auto nextSize = cardSize(definition, node.parameters, node.customSize);
-        const bool changed = nextPorts != inputPorts;
+        const bool changed = nextPorts != inputPorts || nextOutputs != outputPorts;
         if (changed) {
             prepareGeometryChange();
             inputPorts = nextPorts;
+            outputPorts = nextOutputs;
         }
         if (definition.displaysText)
             fitDisplayText();
@@ -312,6 +321,7 @@ public:
     void setStatus(const QString &status) { pendingStatus = status; }
     const QString &displayText() const { return pendingText; }
     void setDisplayText(const QString &text) { pendingText = text; }
+    void setSpectrum(const SpectrumFrame &frame) { spectrum = frame; update(); }
 
     void presentValues()
     {
@@ -335,16 +345,41 @@ public:
 
     qint64 recordingSamples() const { return recording ? recording->sampleCount() : 0; }
 
-    bool adjustRecording(QPointF position, WaveformGesture gesture, double steps)
+    WaveformHit recordingHit(QPointF position) const
     {
-        if (!recording || !recordingChart().contains(position))
-            return false;
+        return recording ? waveformHit(recordingChart(), recordingLanes(), position) : WaveformHit{};
+    }
+
+    void setRecordingHover(WaveformHover hover)
+    {
+        if (recordingHover.hit.region != hover.hit.region || recordingHover.hit.lane != hover.hit.lane
+            || (hover.hit.region == WaveformRegion::Plot && (recordingHover.position != hover.position || recordingHover.radius != hover.radius))) {
+            recordingHover = hover;
+            update();
+        }
+    }
+
+    bool adjustRecording(WaveformHit hit, QPointF position, double steps, bool pan)
+    {
         refreshRecordingBounds();
-        const QPointF anchor = waveformAnchor(recordingChart(), recordingLanes(), position);
-        adjustWaveformView(recordingView, recordingLimits, gesture, steps, anchor);
-        refreshRecordingFrame();
-        update();
-        return true;
+        const WaveformView previous = recordingView;
+        const QRectF plot = waveformPlotRect(recordingChart(), recordingLanes(), hit.lane);
+        const QPointF anchor((position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height());
+        const bool time = hit.region == WaveformRegion::TimeAxis;
+        adjustWaveformView(recordingView, recordingLimits, time ? (pan ? WaveformGesture::PanTime : WaveformGesture::ZoomTime)
+                                                                : (pan ? WaveformGesture::PanValue : WaveformGesture::ZoomValue),
+                           steps, anchor);
+        return finishRecordingMove(previous);
+    }
+
+    bool dragRecording(WaveformHit hit, QPointF delta)
+    {
+        refreshRecordingBounds();
+        const WaveformView previous = recordingView;
+        const QRectF plot = waveformPlotRect(recordingChart(), recordingLanes(), std::min(hit.lane, recordingLanes() - 1));
+        const double fraction = hit.region == WaveformRegion::TimeAxis ? -delta.x() / plot.width() : delta.y() / plot.height();
+        panWaveformAxis(recordingView, recordingLimits, hit.region, fraction);
+        return finishRecordingMove(previous);
     }
 
     void fitRecording()
@@ -365,6 +400,10 @@ public:
     }
 
     WaveformCsvSnapshot recordingCsv() const { return recording ? recording->csvSnapshot() : WaveformCsvSnapshot(); }
+    WaveformPacket recordingViewport() const
+    {
+        return recording && !outputPorts.isEmpty() ? recording->viewport(recordingView, recordingChannels()) : WaveformPacket{};
+    }
 
     bool exportRecordingImage(const QString &path, QString &error) const
     {
@@ -391,7 +430,7 @@ protected:
     }
 
 private:
-    bool resizable() const { return definition.scope || definition.recordsWaveform; }
+    bool resizable() const { return definition.resizable(); }
 
     qreal chartLeft() const
     {
@@ -402,6 +441,15 @@ private:
 
     int recordingChannels() const { return std::max(configuredChannels, recording->channelCount()); }
     int recordingLanes() const { return recordingLayout == WaveformLayout::Separate ? recordingChannels() : 1; }
+
+    bool finishRecordingMove(const WaveformView &previous)
+    {
+        if (recordingView == previous)
+            return false;
+        refreshRecordingFrame();
+        update();
+        return true;
+    }
 
     void refreshRecordingBounds()
     {
@@ -523,6 +571,7 @@ private:
 
     const ThemeColors &colors;
     QList<PortDefinition> inputPorts;
+    QList<PortDefinition> outputPorts;
     QSizeF dimensions;
     std::unique_ptr<ScopeCapture> capture;
     std::unique_ptr<WaveformRecording> recording;
@@ -530,6 +579,8 @@ private:
     WaveformView recordingLimits;
     WaveformFrame recordingFrame;
     WaveformLayout recordingLayout = WaveformLayout::Overlay;
+    WaveformHover recordingHover;
+    SpectrumFrame spectrum;
     int recordingRate = 1000;
     int configuredChannels = 1;
     QString pendingStatus;
@@ -603,6 +654,13 @@ Canvas::Canvas(Graph &graph, QWidget *parent)
     repaintTimer.setInterval(32);
     repaintTimer.setSingleShot(true);
     QObject::connect(&repaintTimer, &QTimer::timeout, this, &Canvas::flushSamples);
+    waveformPublishTimer.setInterval(100);
+    waveformPublishTimer.setSingleShot(true);
+    QObject::connect(&waveformPublishTimer, &QTimer::timeout, this, [this] {
+        const auto pending = std::exchange(changedViewports, {});
+        for (const QUuid &id : pending)
+            Q_EMIT recordingViewportChanged(id);
+    });
     QObject::connect(workspace, &QGraphicsScene::selectionChanged, this, &Canvas::selectionChanged);
 }
 
@@ -610,6 +668,10 @@ void Canvas::rebuild()
 {
     cancelWire();
     resizingNode = QUuid{};
+    waveformDrag.reset();
+    hoveredWaveform = QUuid{};
+    changedViewports.clear();
+    waveformPublishTimer.stop();
     nodes.clear();
     edges.clear();
     incidentEdges.clear();
@@ -772,6 +834,13 @@ void Canvas::removeSelection()
     for (const QUuid &id : selectedNodes) {
         graph.removeNode(id);
         dirtyNodes.remove(id);
+        changedViewports.remove(id);
+        if (hoveredWaveform == id)
+            hoveredWaveform = QUuid{};
+        if (waveformDrag && waveformDrag->node == id) {
+            waveformDrag.reset();
+            viewport()->unsetCursor();
+        }
         delete nodes.take(id);
     }
     Q_EMIT topologyChanged();
@@ -841,6 +910,12 @@ void Canvas::setNodeDisplayText(const QUuid &id, const QString &text)
     }
 }
 
+void Canvas::setNodeSpectrum(const QUuid &id, const SpectrumFrame &frame)
+{
+    if (NodeItem *item = nodes.value(id); item && item->definition.displaysSpectrum)
+        item->setSpectrum(frame);
+}
+
 QString Canvas::nodeDisplayText(const QUuid &id) const
 {
     const NodeItem *item = nodes.value(id);
@@ -853,6 +928,7 @@ void Canvas::sample(const QUuid &id, int channel, const QList<double> &values)
         QString error;
         item->push(channel, values, error);
         scheduleRepaint(id);
+        scheduleRecordingViewport(id);
         if (!error.isEmpty())
             Q_EMIT message(QString("波形暂存失败：%1").arg(error));
     }
@@ -866,6 +942,7 @@ void Canvas::updateNodeSettings(const Node &node, const QList<QUuid> &removedEdg
         cancelWire();
         updateEdges(node.id);
     }
+    scheduleRecordingViewport(node.id);
 }
 
 bool Canvas::scopePaused(const QUuid &id) const
@@ -894,8 +971,10 @@ qint64 Canvas::recordingSampleCount(const QUuid &id) const
 
 void Canvas::fitRecording(const QUuid &id)
 {
-    if (NodeItem *item = nodes.value(id))
+    if (NodeItem *item = nodes.value(id)) {
         item->fitRecording();
+        scheduleRecordingViewport(id);
+    }
 }
 
 void Canvas::clearRecording(const QUuid &id)
@@ -903,6 +982,8 @@ void Canvas::clearRecording(const QUuid &id)
     if (NodeItem *item = nodes.value(id); item && item->definition.recordsWaveform) {
         item->clearRecording(*graph.node(id));
         Q_EMIT recordingUpdated(id, 0);
+        changedViewports.remove(id);
+        Q_EMIT recordingViewportChanged(id);
     }
 }
 
@@ -910,6 +991,12 @@ WaveformCsvSnapshot Canvas::recordingCsv(const QUuid &id) const
 {
     const NodeItem *item = nodes.value(id);
     return item ? item->recordingCsv() : WaveformCsvSnapshot();
+}
+
+WaveformPacket Canvas::recordingViewport(const QUuid &id) const
+{
+    const NodeItem *item = nodes.value(id);
+    return item ? item->recordingViewport() : WaveformPacket{};
 }
 
 bool Canvas::exportRecordingImage(const QUuid &id, const QString &path, QString &error) const
@@ -925,6 +1012,15 @@ void Canvas::scheduleRepaint(const QUuid &id)
     dirtyNodes.insert(id);
     if (!repaintTimer.isActive())
         repaintTimer.start();
+}
+
+void Canvas::scheduleRecordingViewport(const QUuid &id)
+{
+    if (NodeItem *item = nodes.value(id); item && item->port(true, waveformViewportPort)) {
+        changedViewports.insert(id);
+        if (!waveformPublishTimer.isActive())
+            waveformPublishTimer.start();
+    }
 }
 
 void Canvas::flushSamples()
@@ -978,6 +1074,8 @@ void Canvas::drawForeground(QPainter *painter, const QRectF &)
 
 bool Canvas::viewportEvent(QEvent *event)
 {
+    if (event->type() == QEvent::Leave && !waveformDrag)
+        clearWaveformHover();
     if (event->type() == QEvent::ToolTip) {
         auto *help = static_cast<QHelpEvent *>(event);
         if (const auto hit = portAt(help->pos())) {
@@ -994,7 +1092,7 @@ bool Canvas::viewportEvent(QEvent *event)
 
 void Canvas::wheelEvent(QWheelEvent *event)
 {
-    if (!resizingNode.isNull()) {
+    if (!resizingNode.isNull() || waveformDrag) {
         event->accept();
         return;
     }
@@ -1003,16 +1101,16 @@ void Canvas::wheelEvent(QWheelEvent *event)
     const QPoint pixel = event->pixelDelta();
     const qreal vertical = angle.y() ? angle.y() / 120.0 : pixel.y() / 90.0;
     const qreal horizontal = angle.x() ? angle.x() / 120.0 : pixel.x() / 90.0;
-    if (!wireStart && panButton == Qt::NoButton) {
+    if (!spaceHeld && !wireStart && panButton == Qt::NoButton) {
         if (auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(cursor))) {
-            const bool horizontalWheel = horizontal != 0 && std::abs(horizontal) >= std::abs(vertical);
-            const double delta = horizontalWheel ? horizontal : vertical;
-            const auto modifiers = event->modifiers();
-            const auto gesture = modifiers.testFlag(Qt::AltModifier) ? WaveformGesture::ZoomTime
-                : horizontalWheel ? WaveformGesture::PanTime
-                : modifiers.testFlag(Qt::ControlModifier) ? WaveformGesture::PanValue
-                : modifiers.testFlag(Qt::ShiftModifier) ? WaveformGesture::PanTime : WaveformGesture::ZoomValue;
-            if (delta != 0 && node->adjustRecording(node->mapFromScene(mapToScene(cursor)), gesture, delta)) {
+            const QPointF position = node->mapFromScene(mapToScene(cursor));
+            const WaveformHit hit = node->recordingHit(position);
+            if (hit.isAxis() && !node->onResizeGrip(position)) {
+                const double steps = hit.region == WaveformRegion::TimeAxis && std::abs(horizontal) > std::abs(vertical)
+                    ? horizontal : vertical;
+                if (steps != 0 && node->adjustRecording(hit, position, steps, event->modifiers().testFlag(Qt::ShiftModifier)))
+                    scheduleRecordingViewport(node->id);
+                updateWaveformHover(cursor);
                 event->accept();
                 return;
             }
@@ -1030,6 +1128,8 @@ void Canvas::wheelEvent(QWheelEvent *event)
     centerOn(mapToScene(viewport()->rect().center()) + anchor - mapToScene(cursor));
     if (wireStart)
         updateWire(cursor);
+    else if (!spaceHeld && panButton == Qt::NoButton)
+        updateWaveformHover(cursor);
     Q_EMIT zoomChanged(next * 100);
     event->accept();
 }
@@ -1103,15 +1203,44 @@ void Canvas::resizeCard(const QPoint &position)
     }
 }
 
+void Canvas::clearWaveformHover()
+{
+    if (NodeItem *item = nodes.value(hoveredWaveform))
+        item->setRecordingHover({});
+    hoveredWaveform = QUuid{};
+}
+
+void Canvas::updateWaveformHover(const QPoint &position)
+{
+    auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(position));
+    if (node && !node->onResizeGrip(node->mapFromScene(mapToScene(position)))) {
+        const QPointF local = node->mapFromScene(mapToScene(position));
+        const WaveformHit hit = node->recordingHit(local);
+        if (hit.region != WaveformRegion::None) {
+            if (hoveredWaveform != node->id)
+                clearWaveformHover();
+            hoveredWaveform = node->id;
+            const qreal radius = std::clamp(18 / transform().m11(), 7.0, 36.0);
+            node->setRecordingHover({hit, local, radius});
+            viewport()->setCursor(hit.region == WaveformRegion::TimeAxis ? Qt::SizeHorCursor
+                : hit.region == WaveformRegion::ValueAxis ? Qt::SizeVerCursor : Qt::CrossCursor);
+            return;
+        }
+    }
+    clearWaveformHover();
+    viewport()->setCursor(resizeGripAt(position) ? Qt::SizeFDiagCursor : Qt::ArrowCursor);
+}
+
 void Canvas::mousePressEvent(QMouseEvent *event)
 {
     const QPoint position = event->position().toPoint();
-    if (panButton != Qt::NoButton || wireStart || !resizingNode.isNull()) {
+    if (panButton != Qt::NoButton || wireStart || !resizingNode.isNull() || waveformDrag) {
         event->accept();
         return;
     }
     if (event->button() == Qt::MiddleButton || (spaceHeld && event->button() == Qt::LeftButton)) {
         setFocus();
+        clearWaveformHover();
         panButton = event->button();
         panPosition = position;
         viewport()->setCursor(Qt::ClosedHandCursor);
@@ -1121,6 +1250,7 @@ void Canvas::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton) {
         if (NodeItem *node = resizeGripAt(position)) {
             setFocus();
+            clearWaveformHover();
             resizingNode = node->id;
             if (!node->isSelected())
                 selectNode(node->id);
@@ -1132,6 +1262,7 @@ void Canvas::mousePressEvent(QMouseEvent *event)
         }
         if (const auto port = portAt(position)) {
             setFocus();
+            clearWaveformHover();
             wireStart = port;
             draftWire = workspace->addPath({});
             draftWire->setZValue(-0.5);
@@ -1140,6 +1271,19 @@ void Canvas::mousePressEvent(QMouseEvent *event)
             updateWire(position);
             event->accept();
             return;
+        }
+        if (auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(position))) {
+            const QPointF local = node->mapFromScene(mapToScene(position));
+            const WaveformHit hit = node->recordingHit(local);
+            if (hit.isAxis()) {
+                setFocus();
+                if (!node->isSelected())
+                    selectNode(node->id);
+                updateWaveformHover(position);
+                waveformDrag = WaveformDrag{node->id, hit, local};
+                event->accept();
+                return;
+            }
         }
     }
     QGraphicsView::mousePressEvent(event);
@@ -1160,15 +1304,42 @@ void Canvas::mouseMoveEvent(QMouseEvent *event)
     } else if (!resizingNode.isNull()) {
         resizeCard(position);
         event->accept();
+    } else if (waveformDrag) {
+        if (NodeItem *node = nodes.value(waveformDrag->node)) {
+            const QPointF local = node->mapFromScene(mapToScene(position));
+            if (node->dragRecording(waveformDrag->hit, local - waveformDrag->previous))
+                scheduleRecordingViewport(node->id);
+            waveformDrag->previous = local;
+        }
+        event->accept();
     } else {
         if (!spaceHeld && !event->buttons())
-            viewport()->setCursor(resizeGripAt(position) ? Qt::SizeFDiagCursor : Qt::ArrowCursor);
+            updateWaveformHover(position);
+        else if (event->buttons())
+            clearWaveformHover();
         QGraphicsView::mouseMoveEvent(event);
     }
 }
 
 void Canvas::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (waveformDrag && event->button() == Qt::LeftButton) {
+        const QPoint position = event->position().toPoint();
+        if (NodeItem *node = nodes.value(waveformDrag->node)) {
+            const QPointF local = node->mapFromScene(mapToScene(position));
+            if (node->dragRecording(waveformDrag->hit, local - waveformDrag->previous))
+                scheduleRecordingViewport(node->id);
+        }
+        waveformDrag.reset();
+        if (spaceHeld) {
+            clearWaveformHover();
+            viewport()->setCursor(Qt::OpenHandCursor);
+        } else {
+            updateWaveformHover(position);
+        }
+        event->accept();
+        return;
+    }
     if (!resizingNode.isNull() && event->button() == Qt::LeftButton) {
         const QPoint position = event->position().toPoint();
         resizeCard(position);
@@ -1212,7 +1383,7 @@ void Canvas::mouseReleaseEvent(QMouseEvent *event)
 
 void Canvas::contextMenuEvent(QContextMenuEvent *event)
 {
-    if (wireStart || !resizingNode.isNull())
+    if (wireStart || !resizingNode.isNull() || waveformDrag)
         return;
     QMenu menu(this);
     if (QGraphicsItem *item = itemAt(event->pos()); item && (item->flags() & QGraphicsItem::ItemIsSelectable)) {
@@ -1237,8 +1408,10 @@ void Canvas::keyPressEvent(QKeyEvent *event)
     } else if (event->key() == Qt::Key_Space) {
         if (!event->isAutoRepeat()) {
             spaceHeld = true;
-            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton)
+            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton && !waveformDrag) {
+                clearWaveformHover();
                 viewport()->setCursor(Qt::OpenHandCursor);
+            }
         }
     } else if (event->key() == Qt::Key_Escape && wireStart) {
         cancelWire();
@@ -1254,8 +1427,8 @@ void Canvas::keyReleaseEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Space) {
         if (!event->isAutoRepeat()) {
             spaceHeld = false;
-            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton)
-                viewport()->unsetCursor();
+            if (!wireStart && resizingNode.isNull() && panButton == Qt::NoButton && !waveformDrag)
+                updateWaveformHover(viewport()->mapFromGlobal(QCursor::pos()));
         }
         event->accept();
     } else {
@@ -1268,6 +1441,8 @@ void Canvas::focusOutEvent(QFocusEvent *event)
     spaceHeld = false;
     panButton = Qt::NoButton;
     resizingNode = QUuid{};
+    waveformDrag.reset();
+    clearWaveformHover();
     cancelWire();
     viewport()->unsetCursor();
     QGraphicsView::focusOutEvent(event);

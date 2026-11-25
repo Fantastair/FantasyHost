@@ -1,6 +1,7 @@
 #include "modules.h"
 
 #include "scope.h"
+#include "spectrum.h"
 #include "textdisplay.h"
 
 #include <QSerialPort>
@@ -138,11 +139,13 @@ public:
         Stream &stream = streams[channel];
         const QString format = parameters.value("encoding").toString();
         const qint64 before = invalid;
-        const auto &bytes = std::get<QByteArray>(packet);
+        const auto *bytes = std::get_if<QByteArray>(&packet);
+        if (!bytes)
+            return;
         if (format == "text")
-            readText(stream, bytes, valuesPerFrame, batches);
+            readText(stream, *bytes, valuesPerFrame, batches);
         else
-            readBinary(stream, bytes, format, valuesPerFrame, batches);
+            readBinary(stream, *bytes, format, valuesPerFrame, batches);
 
         bool receivedSamples = false;
         for (int i = 0; i < valuesPerFrame; ++i) {
@@ -293,6 +296,13 @@ ParameterDefinition number(const QString &id, const QString &label, double initi
     return {id, label, ParameterKind::Number, initial, min, max, places, live, affectsPorts, {}};
 }
 
+QList<PortDefinition> recorderOutputs(const QJsonObject &parameters)
+{
+    if (parameters.value("viewportOutput") == "on")
+        return {{waveformViewportPort, "视口波形", DataType::Waveform}};
+    return {};
+}
+
 QList<ParameterDefinition> waveformInputParameters()
 {
     return {
@@ -348,8 +358,10 @@ const QList<ModuleDefinition> &moduleDefinitions()
         }, &create<ScopeInput>, &scopeInputs, true},
         {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters() + QList<ParameterDefinition>{
             choice("viewLayout", "显示布局", "overlay", {{"overlay", "叠加通道"}, {"separate", "分离通道"}}, true),
+            choice("viewportOutput", "视口输出", "off", {{"off", "关闭"}, {"on", "开启"}}, true, true),
         },
-         &create<ScopeInput>, &scopeInputs, false, false, false, true},
+         &create<ScopeInput>, &scopeInputs, false, false, false, true, &recorderOutputs},
+        spectrumDefinition(),
         textDisplayDefinition(),
     };
     return definitions;
@@ -368,6 +380,8 @@ QList<PortDefinition> modulePorts(const ModuleDefinition &module, const QJsonObj
 {
     if (!output && module.dynamicInputs)
         return module.dynamicInputs(parameters);
+    if (output && module.dynamicOutputs)
+        return module.dynamicOutputs(parameters);
     return output ? module.outputs : module.inputs;
 }
 

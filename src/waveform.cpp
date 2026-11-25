@@ -14,6 +14,10 @@
 #include <iterator>
 #include <limits>
 
+namespace {
+constexpr double panPerStep = 0.12;
+}
+
 bool WaveformRecording::append(int channel, const QList<double> &values, int sampleRate, QString &error)
 {
     if (channel < 0 || channel >= int(tracks.size()) || sampleRate <= 0 || values.isEmpty())
@@ -118,6 +122,80 @@ QByteArray WaveformRecording::readBlock(const Series &series, const Block &block
     if (!series.file->seek(block.offset))
         return {};
     return series.file->read(block.count * sizeof(Sample));
+}
+
+qint64 WaveformRecording::sampleBoundary(const Series &series, double time, bool afterEqual) const
+{
+    const auto precedes = [time, afterEqual](double point) { return point < time || (afterEqual && point == time); };
+    const auto block = std::partition_point(series.blocks.cbegin(), series.blocks.cend(),
+                                            [&](const Block &candidate) { return precedes(candidate.lastTime); });
+    if (block == series.blocks.cend())
+        return series.samples;
+    if (!precedes(block->firstTime))
+        return block->offset / sizeof(Sample);
+
+    const QByteArray bytes = readBlock(series, *block);
+    for (qsizetype offset = 0; offset + qsizetype(sizeof(Sample)) <= bytes.size(); offset += sizeof(Sample)) {
+        Sample sample;
+        std::memcpy(&sample, bytes.constData() + offset, sizeof(Sample));
+        if (!precedes(sample.time))
+            return (block->offset + offset) / sizeof(Sample);
+    }
+    return block->offset / sizeof(Sample) + block->count;
+}
+
+std::shared_ptr<const WaveformViewport> WaveformRecording::viewport(WaveformView view, int channels) const
+{
+    auto result = std::make_shared<WaveformViewport>();
+    result->range = view;
+    result->channels = std::clamp(channels, 0, int(tracks.size()));
+    for (int channel = 0; channel < result->channels; ++channel) {
+        const Series &series = tracks[channel];
+        if (!series.samples)
+            continue;
+        const qint64 first = sampleBoundary(series, view.time.low, false);
+        const qint64 end = sampleBoundary(series, view.time.high, true);
+        if (end > first)
+            result->tracks[channel] = {series.file, series.file->fileName(), first, end - first};
+    }
+    return result;
+}
+
+qint64 WaveformViewport::sampleCount(int channel) const
+{
+    return channel >= 0 && channel < channels ? tracks[channel].count : 0;
+}
+
+bool WaveformViewport::sameSamples(const WaveformViewport &other, int channel) const
+{
+    const qint64 count = sampleCount(channel);
+    if (!count)
+        return other.sampleCount(channel) == 0;
+    return count == other.sampleCount(channel) && tracks[channel].storage == other.tracks[channel].storage
+        && tracks[channel].first == other.tracks[channel].first;
+}
+
+QList<QPointF> WaveformViewport::readChannel(int channel, qint64 offset, qsizetype count) const
+{
+    using Sample = WaveformRecording::Sample;
+    if (offset < 0 || count <= 0 || offset >= sampleCount(channel))
+        return {};
+    const Channel &series = tracks[channel];
+    const qint64 length = std::min<qint64>({count, series.count - offset, std::numeric_limits<qsizetype>::max() / sizeof(Sample)});
+    QFile file(series.path);
+    if (!file.open(QIODevice::ReadOnly) || !file.seek((series.first + offset) * sizeof(Sample)))
+        return {};
+    const QByteArray bytes = file.read(length * sizeof(Sample));
+    if (bytes.size() != length * qint64(sizeof(Sample)))
+        return {};
+    QList<QPointF> samples;
+    samples.reserve(length);
+    for (qsizetype position = 0; position < bytes.size(); position += sizeof(Sample)) {
+        Sample sample;
+        std::memcpy(&sample, bytes.constData() + position, sizeof(Sample));
+        samples.append({sample.time, sample.value});
+    }
+    return samples;
 }
 
 QList<QPointF> WaveformRecording::trace(int channel, WaveformRange time, int columns) const
@@ -270,12 +348,18 @@ void adjustWaveformView(WaveformView &view, const WaveformView &bounds, Waveform
     if (span >= limit.span()) {
         axis = limit;
     } else if (span > 0) {
-        const double wanted = zoom ? axis.low + ratio * (axis.span() - span) : axis.low + span * steps * 0.12;
+        const double wanted = zoom ? axis.low + ratio * (axis.span() - span) : axis.low + span * steps * panPerStep;
         const double low = std::clamp(wanted, limit.low, std::max(limit.low, limit.high - span));
         const double high = std::min(limit.high, low + span);
         if (high > low)
             axis = {low, high};
     }
+}
+
+void panWaveformAxis(WaveformView &view, const WaveformView &bounds, WaveformRegion axis, double fraction)
+{
+    const bool time = axis == WaveformRegion::TimeAxis;
+    adjustWaveformView(view, bounds, time ? WaveformGesture::PanTime : WaveformGesture::PanValue, fraction / panPerStep, {});
 }
 
 QRectF waveformPlotRect(const QRectF &chart, int lanes, int lane)
@@ -289,16 +373,33 @@ QRectF waveformPlotRect(const QRectF &chart, int lanes, int lane)
     return {plots.left(), plots.top() + lane * (height + gap), plots.width(), height};
 }
 
-QPointF waveformAnchor(const QRectF &chart, int lanes, QPointF position)
+namespace {
+QRectF timeAxisRect(const QRectF &chart, const QRectF &plot)
 {
-    QRectF plot = waveformPlotRect(chart, lanes);
-    for (int lane = 1; lane < lanes; ++lane) {
-        const QRectF next = waveformPlotRect(chart, lanes, lane);
-        if (position.y() <= (plot.bottom() + next.top()) / 2)
-            break;
-        plot = next;
+    return {plot.left() - 8, plot.bottom(), chart.right() - plot.left() + 5, 22};
+}
+
+QRectF valueAxisRect(const QRectF &chart, const QRectF &plot, int lanes)
+{
+    const qreal left = chart.left() + (lanes > 1 ? 36 : 2);
+    return {left, plot.top() - 4, plot.left() - left, plot.height() + 8};
+}
+}
+
+WaveformHit waveformHit(const QRectF &chart, int lanes, QPointF position)
+{
+    if (!chart.contains(position))
+        return {};
+    if (timeAxisRect(chart, waveformPlotRect(chart, lanes, lanes - 1)).contains(position))
+        return {WaveformRegion::TimeAxis, lanes - 1};
+    for (int lane = 0; lane < lanes; ++lane) {
+        const QRectF plot = waveformPlotRect(chart, lanes, lane);
+        if (valueAxisRect(chart, plot, lanes).contains(position))
+            return {WaveformRegion::ValueAxis, lane};
+        if (plot.contains(position))
+            return {WaveformRegion::Plot, lane};
     }
-    return {(position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height()};
+    return {};
 }
 
 QColor waveformChannelColor(int channel, const ThemeColors &colors)
@@ -323,27 +424,89 @@ WaveformFrame waveformFrame(const WaveformRecording &recording, const WaveformVi
 }
 
 namespace {
+QPointF samplePosition(const QRectF &plot, const WaveformView &view, QPointF point)
+{
+    const double x = std::clamp((point.x() - view.time.low) / view.time.span(), -64.0, 65.0);
+    const double y = std::clamp((point.y() - view.value.low) / view.value.span(), -64.0, 65.0);
+    return {plot.left() + x * plot.width(), plot.bottom() - y * plot.height()};
+}
+
 void paintTrace(QPainter &painter, const QRectF &plot, const WaveformView &view, const QList<QPointF> &points, const QColor &color)
 {
     if (points.isEmpty())
         return;
-    const auto position = [&](QPointF point) {
-        const double x = std::clamp((point.x() - view.time.low) / view.time.span(), -64.0, 65.0);
-        const double y = std::clamp((point.y() - view.value.low) / view.value.span(), -64.0, 65.0);
-        return QPointF(plot.left() + x * plot.width(), plot.bottom() - y * plot.height());
-    };
-    QPainterPath trace(position(points.first()));
+    QPainterPath trace(samplePosition(plot, view, points.first()));
     for (qsizetype i = 1; i < points.size(); ++i)
-        trace.lineTo(position(points.at(i)));
+        trace.lineTo(samplePosition(plot, view, points.at(i)));
     painter.setPen(QPen(color, 1.35));
     if (points.size() == 1)
         painter.drawEllipse(trace.currentPosition(), 1.7, 1.7);
     else
         painter.drawPath(trace);
 }
+
+void paintCrosshair(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, int lanes,
+                    const ThemeColors &colors, const WaveformHover &hover)
+{
+    const QRectF plot = waveformPlotRect(chart, lanes, hover.hit.lane);
+    const auto &view = frame.view;
+    const qreal secondsPerPixel = view.time.span() / plot.width();
+    const qreal time = view.time.low + (hover.position.x() - plot.left()) * secondsPerPixel;
+    const qreal halfWidth = hover.radius * secondsPerPixel;
+    const int first = lanes > 1 ? hover.hit.lane : 0;
+    const int end = lanes > 1 ? first + 1 : int(frame.traces.size());
+    double distance = std::numeric_limits<double>::infinity();
+    int channel = -1;
+    QPointF best;
+    for (int index = first; index < end; ++index) {
+        const auto &points = frame.traces[index];
+        auto point = std::lower_bound(points.cbegin(), points.cend(), time - halfWidth,
+                                      [](QPointF sample, double left) { return sample.x() < left; });
+        for (; point != points.cend() && point->x() <= time + halfWidth; ++point) {
+            const QPointF position = samplePosition(plot, view, *point);
+            if (!plot.contains(position))
+                continue;
+            const QPointF delta = position - hover.position;
+            const double squared = QPointF::dotProduct(delta, delta);
+            if (squared < distance) {
+                distance = squared;
+                channel = index;
+                best = *point;
+            }
+        }
+    }
+    if (channel < 0)
+        return;
+
+    const QPointF marker = samplePosition(plot, view, best);
+    const QColor color = waveformChannelColor(channel, colors);
+    painter.setPen(QPen(color, 0.9, Qt::DashLine));
+    for (int lane = 0; lane < lanes; ++lane) {
+        const QRectF row = waveformPlotRect(chart, lanes, lane);
+        painter.drawLine(QPointF(marker.x(), row.top()), QPointF(marker.x(), row.bottom()));
+    }
+    painter.drawLine(QPointF(plot.left(), marker.y()), QPointF(plot.right(), marker.y()));
+    painter.setPen(QPen(colors.plot, 1));
+    painter.setBrush(color);
+    painter.drawEllipse(marker, 3.6, 3.6);
+
+    const QString label = QString("CH%1   %2 s   %3").arg(channel + 1)
+        .arg(QString::number(best.x(), 'g', 12), QString::number(best.y(), 'g', 9));
+    const qreal width = painter.fontMetrics().horizontalAdvance(label) + 14;
+    constexpr qreal height = 19;
+    const qreal left = std::clamp(marker.x() + 9, chart.left() + 4, std::max(chart.left() + 4, chart.right() - width - 4));
+    const qreal top = marker.y() - height - 7 >= chart.top() ? marker.y() - height - 7 : marker.y() + 7;
+    const QRectF bubble(left, top, width, height);
+    painter.setPen(QPen(color, 0.9));
+    painter.setBrush(colors.card);
+    painter.drawRoundedRect(bubble, 4, 4);
+    painter.setPen(colors.text);
+    painter.drawText(bubble, Qt::AlignCenter, label);
+}
 }
 
-void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, WaveformLayout layout, const ThemeColors &colors)
+void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, WaveformLayout layout,
+                   const ThemeColors &colors, const WaveformHover &hover)
 {
     const WaveformView &view = frame.view;
     const int channels = int(frame.traces.size());
@@ -361,6 +524,14 @@ void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &
     const QPen grid(colors.border, 0.8);
     for (int lane = 0; lane < lanes; ++lane) {
         const QRectF plot = waveformPlotRect(chart, lanes, lane);
+        if (hover.hit.isAxis() && hover.hit.lane == lane) {
+            const bool time = hover.hit.region == WaveformRegion::TimeAxis;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(colors.selection);
+            painter.drawRoundedRect(time ? timeAxisRect(chart, plot) : valueAxisRect(chart, plot, lanes), 4, 4);
+            painter.setPen(QPen(colors.accent, 1.2));
+            painter.drawLine(time ? plot.bottomLeft() : plot.topLeft(), time ? plot.bottomRight() : plot.bottomLeft());
+        }
         const int horizontalTicks = std::max(2, qFloor(plot.width() / 78));
         for (int tick = 0; tick <= horizontalTicks; ++tick) {
             const double ratio = double(tick) / horizontalTicks;
@@ -419,6 +590,8 @@ void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &
         painter.setPen(colors.muted);
         painter.drawText(QRectF(plot.right() - 22, chart.bottom() - 22, 22, 16), Qt::AlignRight | Qt::AlignVCenter, "秒");
     }
+    if (hover.hit.region == WaveformRegion::Plot && hover.hit.lane < lanes)
+        paintCrosshair(painter, chart, frame, lanes, colors, hover);
     painter.restore();
 }
 

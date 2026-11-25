@@ -106,10 +106,11 @@ public:
             value = decoder(*bytes);
             if (value.isEmpty() && !bytes->isEmpty())
                 return;
-        } else {
+        } else if (const auto *number = std::get_if<double>(&packet)) {
             decoders.erase(port);
-            value = QString::number(std::get<double>(packet), 'g', 15);
-        }
+            value = QString::number(*number, 'g', 15);
+        } else
+            return;
         if (value.size() > maxDisplayLength + 1)
             value.truncate(maxDisplayLength + 1);
         const auto previous = values.constFind(port);

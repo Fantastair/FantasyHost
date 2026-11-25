@@ -1,5 +1,7 @@
 #include "runner.h"
+#include "spectrum.h"
 
+#include <QSet>
 #include <QTimer>
 
 GraphRunner::GraphRunner(QObject *parent) : QObject(parent) {}
@@ -29,12 +31,18 @@ void GraphRunner::sync(const Graph &graph)
             resetInput(edge.to);
     }
     routes.clear();
+    QSet<QUuid> waveformSources;
     for (const Connection &edge : graph.connections()) {
-        if (!connections.contains(edge.id))
+        if (!connections.contains(edge.id)) {
             resetInput(edge.to);
+            if (edge.from.port == waveformViewportPort)
+                waveformSources.insert(edge.from.node);
+        }
         routes.insert(edge.from.node, edge);
     }
     connections = graph.connections();
+    for (const QUuid &source : waveformSources)
+        Q_EMIT waveformRequested(source);
 }
 
 void GraphRunner::add(const Node &node)
@@ -48,6 +56,7 @@ void GraphRunner::add(const Node &node)
         [this, id](const QByteArray &bytes) { if (isOpen(id)) Q_EMIT serialReceived(id, bytes); },
         [this, id](const QString &message) { fail(id, message); },
         [this, id](const QString &text) { Q_EMIT textReceived(id, text); },
+        [this, id](const SpectrumFrame &frame) { Q_EMIT spectrumReceived(id, frame); },
     });
     module->setParameters(node.parameters);
     modules.emplace(id, Entry{std::move(module), definition.manualOpen, !definition.manualOpen});
@@ -113,6 +122,21 @@ void GraphRunner::updateParameters(const Node &node)
     const auto found = modules.find(node.id);
     if (found != modules.end())
         found->second.module->setParameters(node.parameters);
+}
+
+bool GraphRunner::hasWaveformReceivers(const QUuid &id) const
+{
+    const auto range = routes.equal_range(id);
+    for (auto route = range.first; route != range.second; ++route) {
+        if (route->from.port == waveformViewportPort)
+            return true;
+    }
+    return false;
+}
+
+void GraphRunner::publishWaveform(const QUuid &id, const WaveformPacket &packet)
+{
+    publish(id, waveformViewportPort, packet);
 }
 
 bool GraphRunner::sendManual(const QUuid &id, const QString &text, QString &error)

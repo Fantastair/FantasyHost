@@ -73,7 +73,7 @@ bool Graph::resizeNode(const QUuid &id, QSizeF size)
     if (found == nodes_.end() || !validScopeSize(size) || found->customSize == size)
         return false;
     const auto *definition = moduleDefinition(found->type);
-    if (!definition->scope && !definition->recordsWaveform)
+    if (!definition->resizable())
         return false;
     found->customSize = size;
     return true;
@@ -133,7 +133,7 @@ QString Graph::connectionError(const Endpoint &from, const Endpoint &to, bool re
     const auto input = target ? portDefinition(*moduleDefinition(target->type), target->parameters, false, to.port) : std::nullopt;
     if (!output || !input)
         return "请连接一个输出端口和一个输入端口。";
-    if (output->type != input->type && input->type != DataType::Any)
+    if (output->type != input->type && (input->type != DataType::Any || output->type == DataType::Waveform))
         return "端口的数据类型不匹配。";
     if (from.node == to.node)
         return "端口必须属于不同的模块。";
@@ -271,7 +271,7 @@ bool Graph::load(const QString &path, Graph &graph, QString &error)
         if (!layoutSize.isUndefined()) {
             const QJsonObject dimensions = layoutSize.toObject();
             size = {dimensions.value("width").toDouble(), dimensions.value("height").toDouble()};
-            if ((!definition->scope && !definition->recordsWaveform) || !validScopeSize(size)) {
+            if (!definition->resizable() || !validScopeSize(size)) {
                 error = QString("模块 %1 的画布尺寸无效。").arg(definition->name);
                 return false;
             }

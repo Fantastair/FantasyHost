@@ -1,6 +1,7 @@
 #pragma once
 
 #include "graph.h"
+#include "spectrum.h"
 
 #include <QMultiHash>
 #include <QObject>
@@ -20,6 +21,8 @@ public:
     void close(const QUuid &id);
     bool isOpen(const QUuid &id) const;
     void updateParameters(const Node &node);
+    bool hasWaveformReceivers(const QUuid &id) const;
+    void publishWaveform(const QUuid &id, const WaveformPacket &packet);
     bool sendManual(const QUuid &id, const QString &text, QString &error);
     QString status(const QUuid &id) const { return statuses.value(id); }
 
@@ -27,6 +30,8 @@ Q_SIGNALS:
     void samplesReceived(const QUuid &id, int channel, const QList<double> &values);
     void serialReceived(const QUuid &id, const QByteArray &bytes);
     void textReceived(const QUuid &id, const QString &text);
+    void spectrumReceived(const QUuid &id, const SpectrumFrame &frame);
+    void waveformRequested(const QUuid &id);
     void statusChanged(const QUuid &id, const QString &status);
     void failed(const QUuid &id, const QString &message);
 

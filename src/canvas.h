@@ -2,6 +2,7 @@
 
 #include "graph.h"
 #include "theme.h"
+#include "waveform.h"
 
 #include <QGraphicsView>
 #include <QHash>
@@ -11,7 +12,6 @@
 
 class NodeItem;
 class EdgeItem;
-class WaveformCsvSnapshot;
 
 class Canvas : public QGraphicsView {
     Q_OBJECT
@@ -28,6 +28,7 @@ public:
     void setFailedNode(const QUuid &id, bool failed);
     void setNodeStatus(const QUuid &id, const QString &status);
     void setNodeDisplayText(const QUuid &id, const QString &text);
+    void setNodeSpectrum(const QUuid &id, const SpectrumFrame &frame);
     QString nodeDisplayText(const QUuid &id) const;
     void sample(const QUuid &id, int channel, const QList<double> &values);
     void updateNodeSettings(const Node &node, const QList<QUuid> &removedEdges);
@@ -38,6 +39,7 @@ public:
     void fitRecording(const QUuid &id);
     void clearRecording(const QUuid &id);
     WaveformCsvSnapshot recordingCsv(const QUuid &id) const;
+    WaveformPacket recordingViewport(const QUuid &id) const;
     bool exportRecordingImage(const QUuid &id, const QString &path, QString &error) const;
     void setTheme(const ThemeColors &theme);
 #ifdef FANTASYHOST_OPENGL
@@ -52,6 +54,7 @@ Q_SIGNALS:
     void zoomChanged(double percent);
     void displayTextPresented(const QUuid &id, const QString &text);
     void recordingUpdated(const QUuid &id, qint64 samples);
+    void recordingViewportChanged(const QUuid &id);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);
 #endif
@@ -74,6 +77,11 @@ private:
         Endpoint endpoint;
         bool output;
     };
+    struct WaveformDrag {
+        QUuid node;
+        WaveformHit hit;
+        QPointF previous;
+    };
 
     void addModuleAt(const QString &type, QPointF position);
     void addNodeItem(const Node &node);
@@ -87,6 +95,9 @@ private:
     NodeItem *resizeGripAt(const QPoint &position) const;
     void resizeCard(const QPoint &position);
     void scheduleRepaint(const QUuid &id);
+    void scheduleRecordingViewport(const QUuid &id);
+    void updateWaveformHover(const QPoint &position);
+    void clearWaveformHover();
     void flushSamples();
 
     Graph &graph;
@@ -97,6 +108,10 @@ private:
     QMultiHash<QUuid, QUuid> incidentEdges;
     QSet<QUuid> dirtyNodes;
     QTimer repaintTimer;
+    QTimer waveformPublishTimer;
+    QSet<QUuid> changedViewports;
+    QUuid hoveredWaveform;
+    std::optional<WaveformDrag> waveformDrag;
     std::optional<PortHit> wireStart;
     QGraphicsPathItem *draftWire = nullptr;
     QUuid resizingNode;
