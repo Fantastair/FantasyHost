@@ -35,6 +35,8 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QStyleHints>
+#include <QStyleOptionComboBox>
+#include <QStylePainter>
 #include <QToolBar>
 #include <QToolButton>
 #include <QThread>
@@ -123,6 +125,35 @@ public:
 private:
     QToolButton *const minus;
     QToolButton *const plus;
+};
+
+class WorkspaceComboBox final : public QComboBox {
+public:
+    explicit WorkspaceComboBox(QWidget *parent) : QComboBox(parent)
+    {
+        setProperty("workspaceChevron", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        const QRect arrow = style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
+        QStylePainter painter(this);
+        // Keep the native hit target and label layout while drawing our own indicator.
+        option.subControls = QStyle::SC_ComboBoxFrame;
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+
+        const QPointF center = QRectF(arrow).center();
+        const qreal direction = (option.state & QStyle::State_On) ? -1 : 1;
+        const QColor color = option.palette.color(isEnabled() ? QPalette::PlaceholderText : QPalette::ButtonText);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPolyline(QPolygonF{center + QPointF(-4, -2 * direction), center + QPointF(0, 2 * direction),
+                                      center + QPointF(4, -2 * direction)});
+    }
 };
 
 class WindowHeader final : public QWidget {
@@ -608,7 +639,7 @@ void MainWindow::refreshInspector()
             form->addRow(editor);
             continue;
         } else if (parameter.id == "baud") {
-            auto *baud = new QComboBox(formPane);
+            auto *baud = new WorkspaceComboBox(formPane);
             baud->setEditable(true);
             baud->setInsertPolicy(QComboBox::NoInsert);
             auto *validator = new QIntValidator(parameter.minimum, parameter.maximum, baud);
@@ -637,7 +668,7 @@ void MainWindow::refreshInspector()
             auto *row = new QWidget(formPane);
             auto *layout = new QHBoxLayout(row);
             layout->setContentsMargins(0, 0, 0, 0);
-            auto *combo = new QComboBox(row);
+            auto *combo = new WorkspaceComboBox(row);
             combo->setObjectName("serialPortSelector");
             combo->setAccessibleName(parameter.label);
             combo->setEditable(true);
@@ -663,7 +694,7 @@ void MainWindow::refreshInspector()
             layout->addWidget(refresh);
             editor = row;
         } else {
-            auto *combo = new QComboBox(formPane);
+            auto *combo = new WorkspaceComboBox(formPane);
             for (const ParameterChoice &choice : parameter.choices)
                 combo->addItem(choice.label, choice.value);
             combo->setCurrentIndex(combo->findData(current.toString()));

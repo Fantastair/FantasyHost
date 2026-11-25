@@ -110,6 +110,25 @@ QString workspaceStyle(const ThemeColors &colors)
         QLineEdit, QDoubleSpinBox, QComboBox {
             background: @card; color: @text; border: 1px solid @border; border-radius: 5px; padding: 4px 6px;
         }
+        QComboBox { border-radius: 7px; padding: 4px 8px; min-height: 18px; combobox-popup: 0; }
+        QComboBox:enabled:focus, QComboBox:enabled:on { border-color: @accent; }
+        QComboBox::drop-down {
+            subcontrol-origin: padding; subcontrol-position: top right; width: 28px;
+            background: transparent; border: 0;
+        }
+        QComboBox[workspaceChevron="true"]::down-arrow { image: none; width: 0; height: 0; }
+        QComboBox QAbstractItemView {
+            background: @card; color: @text; selection-background-color: @selection; selection-color: @text;
+            border: 1px solid @border; border-radius: 6px; outline: 0; padding: 3px;
+        }
+        QComboBox QAbstractItemView::item { min-height: 23px; padding: 1px 6px; border-radius: 4px; }
+        QComboBox QAbstractItemView::item:hover { background: @hover; }
+        QComboBox QAbstractItemView::item:selected { background: @selection; color: @text; }
+        QComboBox QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
+        QComboBox QScrollBar::handle:vertical { background: @border; border-radius: 2px; min-height: 20px; }
+        QComboBox QScrollBar::handle:vertical:hover { background: @muted; }
+        QComboBox QScrollBar::add-line:vertical, QComboBox QScrollBar::sub-line:vertical { height: 0; }
+        QComboBox QScrollBar::add-page:vertical, QComboBox QScrollBar::sub-page:vertical { background: transparent; }
         QWidget#numberEditor {
             background: @card; border: 1px solid @border; border-radius: 7px;
         }
