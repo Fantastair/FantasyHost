@@ -23,6 +23,7 @@ struct WaveformView {
 };
 
 enum class WaveformGesture { ZoomValue, PanValue, ZoomTime, PanTime };
+enum class WaveformLayout { Overlay, Separate };
 
 struct WaveformFrame {
     WaveformView view;
@@ -35,6 +36,7 @@ class WaveformCsvSnapshot;
 class WaveformRecording {
 public:
     bool append(int channel, const QList<double> &values, int sampleRate, QString &error);
+    void clear();
     WaveformView bounds() const;
     qint64 sampleCount() const;
     int channelCount() const;
@@ -81,9 +83,10 @@ private:
 };
 
 void adjustWaveformView(WaveformView &view, const WaveformView &bounds, WaveformGesture gesture, double steps, QPointF anchor);
-QRectF waveformPlotRect(const QRectF &chart);
+QRectF waveformPlotRect(const QRectF &chart, int lanes, int lane = 0);
+QPointF waveformAnchor(const QRectF &chart, int lanes, QPointF position);
 QColor waveformChannelColor(int channel, const ThemeColors &colors);
 WaveformFrame waveformFrame(const WaveformRecording &recording, const WaveformView &view, int channels, int columns);
-void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, const ThemeColors &colors);
+void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, WaveformLayout layout, const ThemeColors &colors);
 bool saveWaveformImage(const QString &path, QSizeF size, const WaveformRecording &recording,
-                       const WaveformView &view, int channels, const ThemeColors &colors, QString &error);
+                       const WaveformView &view, int channels, WaveformLayout layout, const ThemeColors &colors, QString &error);

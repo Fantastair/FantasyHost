@@ -2,6 +2,7 @@
 #include "scope.h"
 #include "waveform.h"
 
+#include <QApplication>
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QGraphicsPathItem>
@@ -13,7 +14,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
-#include <QTextOption>
+#include <QTextLayout>
 #include <QToolTip>
 #include <QVarLengthArray>
 #include <QWheelEvent>
@@ -35,6 +36,18 @@ constexpr qreal chartTop = 47;
 constexpr qreal minimumZoom = 0.000015;
 constexpr qreal cardRadius = 10;
 constexpr qreal scopeFooter = 56;
+constexpr qreal textPaddingX = 14;
+constexpr qreal textPaddingY = 9;
+constexpr qreal textPortTop = 21;
+constexpr qreal maxTextWidth = 480;
+
+QFont displayFont()
+{
+    QFont font = QApplication::font();
+    font.setPixelSize(19);
+    font.setWeight(QFont::DemiBold);
+    return font;
+}
 
 qreal lowestPort(qsizetype inputs, qsizetype outputs)
 {
@@ -48,9 +61,9 @@ QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameter
             return customSize;
         return definition.recordsWaveform ? QSizeF(488, 317) : QSizeF(352, 248);
     }
-    const qreal last = lowestPort(modulePorts(definition, parameters, false).size(), definition.outputs.size());
     if (definition.displaysText)
-        return {336, std::max<qreal>(157, last + 18)};
+        return {92, 42};
+    const qreal last = lowestPort(modulePorts(definition, parameters, false).size(), definition.outputs.size());
     return {234, last + 47};
 }
 
@@ -82,6 +95,15 @@ public:
             capture = std::make_unique<ScopeCapture>();
         if (definition.recordsWaveform)
             recording = std::make_unique<WaveformRecording>();
+        if (definition.displaysText) {
+            displayLayout.setFont(displayFont());
+            displayLayout.setCacheEnabled(true);
+            QTextOption options;
+            options.setAlignment(Qt::AlignLeft | Qt::AlignAbsolute);
+            options.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+            displayLayout.setTextOption(options);
+            layoutDisplayText();
+        }
         applySettings(node);
         setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
         setToolTip(resizable() ? definition.description + " 拖动右下角可调整大小。" : definition.description);
@@ -99,8 +121,10 @@ public:
 
     QSizeF fittedResize(QSizeF requested) const
     {
+        const int lanes = recording ? recordingLanes() : 1;
+        const qreal minimumHeight = lanes > 1 ? chartTop + 18 + 28 + lanes * 68 : Graph::minScopeHeight;
         return {std::clamp(requested.width(), Graph::minScopeWidth, Graph::maxScopeSize),
-                std::clamp(requested.height(), Graph::minScopeHeight, Graph::maxScopeSize)};
+                std::clamp(requested.height(), std::max(minimumHeight, Graph::minScopeHeight), Graph::maxScopeSize)};
     }
 
     void setCardSize(QSizeF size)
@@ -108,10 +132,15 @@ public:
         if (dimensions != size) {
             prepareGeometryChange();
             dimensions = size;
-            if (recording)
-                refreshRecordingFrame();
             update();
         }
+    }
+
+    void resizeCard(QSizeF size)
+    {
+        setCardSize(size);
+        if (recording)
+            refreshRecordingFrame();
     }
 
     QPainterPath shape() const override
@@ -142,7 +171,7 @@ public:
         const auto &list = ports(output);
         for (qsizetype index = 0; index < list.size(); ++index) {
             if (list.at(index).id == id)
-                return {output ? dimensions.width() : 0, portTop + portSpacing * index};
+                return {output ? dimensions.width() : 0, (definition.displaysText ? textPortTop : portTop) + portSpacing * index};
         }
         return {};
     }
@@ -164,18 +193,23 @@ public:
         painter->setPen(QPen(failed ? colors.error : isSelected() ? colors.accent : colors.border, isSelected() ? 2 : 1));
         painter->drawRoundedRect(frame, cardRadius, cardRadius);
 
-        QFont font = painter->font();
-        font.setPixelSize(definition.displaysText ? 11 : 15);
-        font.setWeight(QFont::DemiBold);
-        painter->setFont(font);
-        painter->setPen(definition.displaysText ? colors.muted : colors.text);
-        painter->drawText(QRectF(15, 0, cardWidth - 38, 39), Qt::AlignLeft | Qt::AlignVCenter, definition.name);
-        if (failed) {
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(colors.error);
-            painter->drawEllipse(QPointF(cardWidth - 17, 20), 3.5, 3.5);
+        if (definition.displaysText) {
+            painter->setPen(colors.text);
+            displayLayout.draw(painter, QPointF(textPaddingX, textPaddingY));
         }
+
+        QFont font = painter->font();
         if (!definition.displaysText) {
+            font.setPixelSize(15);
+            font.setWeight(QFont::DemiBold);
+            painter->setFont(font);
+            painter->setPen(colors.text);
+            painter->drawText(QRectF(15, 0, cardWidth - 38, 39), Qt::AlignLeft | Qt::AlignVCenter, definition.name);
+            if (failed) {
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(colors.error);
+                painter->drawEllipse(QPointF(cardWidth - 17, 20), 3.5, 3.5);
+            }
             painter->setPen(colors.border);
             painter->drawLine(QPointF(14, 40), QPointF(cardWidth - 14, 40));
         }
@@ -203,10 +237,8 @@ public:
         if (capture)
             paintPlot(*painter);
         else if (recording)
-            paintWaveform(*painter, recordingChart(), recordingFrame, colors);
-        else if (definition.displaysText)
-            paintText(*painter);
-        else {
+            paintWaveform(*painter, recordingChart(), recordingFrame, recordingLayout, colors);
+        else if (!definition.displaysText) {
             painter->setPen(failed ? colors.error : colors.muted);
             const QString label = shownStatus.isEmpty() ? QString("串口已关闭") : shownStatus;
             painter->drawText(QRectF(14, lowestPort(inputPorts.size(), definition.outputs.size()) + 16, cardWidth - 28, 22),
@@ -225,8 +257,14 @@ public:
         const auto nextPorts = modulePorts(definition, node.parameters, false);
         const auto nextSize = cardSize(definition, node.parameters, node.customSize);
         const bool changed = nextPorts != inputPorts;
-        setCardSize(nextSize);
-        inputPorts = nextPorts;
+        if (changed) {
+            prepareGeometryChange();
+            inputPorts = nextPorts;
+        }
+        if (definition.displaysText)
+            fitDisplayText();
+        else if (!recording)
+            setCardSize(nextSize);
         if (capture) {
             capture->configure(node.parameters);
             if (!paused)
@@ -235,7 +273,8 @@ public:
         if (recording) {
             recordingRate = node.parameters.value("sampleRate").toInt(1000);
             configuredChannels = scopeChannels(node.parameters);
-            refreshRecordingFrame();
+            recordingLayout = node.parameters.value("viewLayout") == "separate" ? WaveformLayout::Separate : WaveformLayout::Overlay;
+            resizeCard(fittedResize(nextSize));
         }
         update();
         return changed;
@@ -277,7 +316,11 @@ public:
     void presentValues()
     {
         shownStatus = pendingStatus;
-        shownText = pendingText;
+        if (shownText != pendingText) {
+            shownText = pendingText;
+            layoutDisplayText();
+            fitDisplayText();
+        }
         if (capture && !paused)
             shownScope = capture->frame();
         if (recording)
@@ -297,8 +340,7 @@ public:
         if (!recording || !recordingChart().contains(position))
             return false;
         refreshRecordingBounds();
-        const QRectF plot = waveformPlotRect(recordingChart());
-        const QPointF anchor((position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height());
+        const QPointF anchor = waveformAnchor(recordingChart(), recordingLanes(), position);
         adjustWaveformView(recordingView, recordingLimits, gesture, steps, anchor);
         refreshRecordingFrame();
         update();
@@ -314,6 +356,14 @@ public:
         }
     }
 
+    void clearRecording(const Node &node)
+    {
+        recording->clear();
+        recordingView = recordingLimits = {};
+        failed = false;
+        applySettings(node);
+    }
+
     WaveformCsvSnapshot recordingCsv() const { return recording ? recording->csvSnapshot() : WaveformCsvSnapshot(); }
 
     bool exportRecordingImage(const QString &path, QString &error) const
@@ -322,7 +372,7 @@ public:
             error = "未找到波形记录器。";
             return false;
         }
-        return saveWaveformImage(path, recordingChart().size(), *recording, recordingView, recordingChannels(), colors, error);
+        return saveWaveformImage(path, recordingChart().size(), *recording, recordingView, recordingChannels(), recordingLayout, colors, error);
     }
 
 protected:
@@ -351,6 +401,7 @@ private:
     QRectF recordingChart() const { return card().adjusted(chartLeft(), chartTop, -13, -18); }
 
     int recordingChannels() const { return std::max(configuredChannels, recording->channelCount()); }
+    int recordingLanes() const { return recordingLayout == WaveformLayout::Separate ? recordingChannels() : 1; }
 
     void refreshRecordingBounds()
     {
@@ -373,23 +424,34 @@ private:
     {
         refreshRecordingBounds();
         recordingFrame = waveformFrame(*recording, recordingView, recordingChannels(),
-                                       std::max(1, qRound(waveformPlotRect(recordingChart()).width())));
+                                       std::max(1, qRound(waveformPlotRect(recordingChart(), recordingLanes()).width())));
     }
 
-    void paintText(QPainter &painter) const
+    void layoutDisplayText()
     {
-        const QRectF content = card().adjusted(23, 37, -17, -12);
-        painter.save();
-        painter.setClipRect(content);
-        painter.setPen(colors.text);
-        QFont font = painter.font();
-        font.setPixelSize(19);
-        font.setWeight(QFont::DemiBold);
-        painter.setFont(font);
-        QTextOption options(Qt::AlignLeft | Qt::AlignTop);
-        options.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        painter.drawText(content, shownText, options);
-        painter.restore();
+        QString text = shownText;
+        text.replace("\r\n", "\n");
+        text.replace('\r', '\n');
+        text.replace('\n', QChar::LineSeparator);
+        displayLayout.setText(text);
+        qreal width = 0;
+        qreal height = 0;
+        displayLayout.beginLayout();
+        for (QTextLine line = displayLayout.createLine(); line.isValid(); line = displayLayout.createLine()) {
+            line.setLineWidth(maxTextWidth);
+            line.setPosition(QPointF(0, height));
+            width = std::max(width, line.naturalTextWidth());
+            height += line.height();
+        }
+        displayLayout.endLayout();
+        displayContent = {std::ceil(width), std::max(std::ceil(height), QFontMetricsF(displayLayout.font()).height())};
+    }
+
+    void fitDisplayText()
+    {
+        const qreal contentHeight = displayContent.height() + 2 * textPaddingY;
+        const qreal portHeight = inputPorts.isEmpty() ? 0 : textPortTop + portSpacing * (inputPorts.size() - 1) + textPaddingY;
+        setCardSize({displayContent.width() + 2 * textPaddingX, std::max(contentHeight, portHeight)});
     }
 
     void paintPlot(QPainter &painter) const
@@ -467,12 +529,15 @@ private:
     WaveformView recordingView;
     WaveformView recordingLimits;
     WaveformFrame recordingFrame;
+    WaveformLayout recordingLayout = WaveformLayout::Overlay;
     int recordingRate = 1000;
     int configuredChannels = 1;
     QString pendingStatus;
     QString shownStatus;
     QString pendingText;
     QString shownText;
+    QTextLayout displayLayout;
+    QSizeF displayContent;
     ScopeFrame shownScope;
     bool paused = false;
 };
@@ -833,6 +898,14 @@ void Canvas::fitRecording(const QUuid &id)
         item->fitRecording();
 }
 
+void Canvas::clearRecording(const QUuid &id)
+{
+    if (NodeItem *item = nodes.value(id); item && item->definition.recordsWaveform) {
+        item->clearRecording(*graph.node(id));
+        Q_EMIT recordingUpdated(id, 0);
+    }
+}
+
 WaveformCsvSnapshot Canvas::recordingCsv(const QUuid &id) const
 {
     const NodeItem *item = nodes.value(id);
@@ -1023,7 +1096,7 @@ void Canvas::resizeCard(const QPoint &position)
         const QPointF delta = mapToScene(position) - resizeOrigin;
         const QSizeF size = node->fittedResize(resizeInitialSize + QSizeF(delta.x(), delta.y()));
         if (size != node->card().size() && graph.resizeNode(node->id, size)) {
-            node->setCardSize(size);
+            node->resizeCard(size);
             updateEdges(node->id);
             Q_EMIT graphChanged();
         }

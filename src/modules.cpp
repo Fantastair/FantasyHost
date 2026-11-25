@@ -346,7 +346,9 @@ const QList<ModuleDefinition> &moduleDefinitions()
             choice("triggerEdge", "触发边沿", "rising", {{"rising", "上升沿"}, {"falling", "下降沿"}}, true),
             number("triggerLevel", "触发电平", 0, -1000000000000.0, 1000000000000.0, 6, true),
         }, &create<ScopeInput>, &scopeInputs, true},
-        {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters(),
+        {"recorder", "波形记录器", "持续记录各通道的波形，可回看和导出。", {}, {}, waveformInputParameters() + QList<ParameterDefinition>{
+            choice("viewLayout", "显示布局", "overlay", {{"overlay", "叠加通道"}, {"separate", "分离通道"}}, true),
+        },
          &create<ScopeInput>, &scopeInputs, false, false, false, true},
         textDisplayDefinition(),
     };

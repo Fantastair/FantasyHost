@@ -71,6 +71,12 @@ bool WaveformRecording::append(int channel, const QList<double> &values, int sam
     return true;
 }
 
+void WaveformRecording::clear()
+{
+    // A CSV export already in progress retains its own reference to these files.
+    tracks = {};
+}
+
 WaveformView WaveformRecording::bounds() const
 {
     double time = 0;
@@ -272,7 +278,28 @@ void adjustWaveformView(WaveformView &view, const WaveformView &bounds, Waveform
     }
 }
 
-QRectF waveformPlotRect(const QRectF &chart) { return chart.adjusted(61, 12, -16, -48); }
+QRectF waveformPlotRect(const QRectF &chart, int lanes, int lane)
+{
+    if (lanes == 1)
+        return chart.adjusted(61, 12, -16, -48);
+
+    constexpr qreal gap = 12;
+    const QRectF plots = chart.adjusted(96, 12, -16, -28);
+    const qreal height = (plots.height() - (lanes - 1) * gap) / lanes;
+    return {plots.left(), plots.top() + lane * (height + gap), plots.width(), height};
+}
+
+QPointF waveformAnchor(const QRectF &chart, int lanes, QPointF position)
+{
+    QRectF plot = waveformPlotRect(chart, lanes);
+    for (int lane = 1; lane < lanes; ++lane) {
+        const QRectF next = waveformPlotRect(chart, lanes, lane);
+        if (position.y() <= (plot.bottom() + next.top()) / 2)
+            break;
+        plot = next;
+    }
+    return {(position.x() - plot.left()) / plot.width(), (plot.bottom() - position.y()) / plot.height()};
+}
 
 QColor waveformChannelColor(int channel, const ThemeColors &colors)
 {
@@ -295,11 +322,33 @@ WaveformFrame waveformFrame(const WaveformRecording &recording, const WaveformVi
     return frame;
 }
 
-void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, const ThemeColors &colors)
+namespace {
+void paintTrace(QPainter &painter, const QRectF &plot, const WaveformView &view, const QList<QPointF> &points, const QColor &color)
+{
+    if (points.isEmpty())
+        return;
+    const auto position = [&](QPointF point) {
+        const double x = std::clamp((point.x() - view.time.low) / view.time.span(), -64.0, 65.0);
+        const double y = std::clamp((point.y() - view.value.low) / view.value.span(), -64.0, 65.0);
+        return QPointF(plot.left() + x * plot.width(), plot.bottom() - y * plot.height());
+    };
+    QPainterPath trace(position(points.first()));
+    for (qsizetype i = 1; i < points.size(); ++i)
+        trace.lineTo(position(points.at(i)));
+    painter.setPen(QPen(color, 1.35));
+    if (points.size() == 1)
+        painter.drawEllipse(trace.currentPosition(), 1.7, 1.7);
+    else
+        painter.drawPath(trace);
+}
+}
+
+void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &frame, WaveformLayout layout, const ThemeColors &colors)
 {
     const WaveformView &view = frame.view;
-    const auto channels = frame.traces.size();
-    const QRectF plot = waveformPlotRect(chart);
+    const int channels = int(frame.traces.size());
+    const bool separate = layout == WaveformLayout::Separate && channels > 1;
+    const int lanes = separate ? channels : 1;
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::NoPen);
@@ -309,67 +358,72 @@ void paintWaveform(QPainter &painter, const QRectF &chart, const WaveformFrame &
     font.setPixelSize(10);
     font.setWeight(QFont::Normal);
     painter.setFont(font);
-    const int horizontalTicks = std::max(2, qFloor(plot.width() / 78));
-    for (int tick = 0; tick <= horizontalTicks; ++tick) {
-        const double ratio = double(tick) / horizontalTicks;
-        const double x = plot.left() + ratio * plot.width();
-        painter.setPen(QPen(colors.border, 0.8));
-        painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
-        painter.setPen(colors.muted);
-        painter.drawText(QRectF(x - 38, plot.bottom() + 4, 76, 15), Qt::AlignCenter,
-                         QString::number(view.time.low + ratio * view.time.span(), 'g', 7));
-    }
-    const int verticalTicks = 4;
-    for (int tick = 0; tick <= verticalTicks; ++tick) {
-        const double ratio = double(tick) / verticalTicks;
-        const double y = plot.bottom() - ratio * plot.height();
-        painter.setPen(QPen(colors.border, 0.8));
-        painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
-        painter.setPen(colors.muted);
-        painter.drawText(QRectF(chart.left() + 2, y - 8, plot.left() - chart.left() - 7, 16), Qt::AlignRight | Qt::AlignVCenter,
-                         QString::number(view.value.low + ratio * view.value.span(), 'g', 5));
+    const QPen grid(colors.border, 0.8);
+    for (int lane = 0; lane < lanes; ++lane) {
+        const QRectF plot = waveformPlotRect(chart, lanes, lane);
+        const int horizontalTicks = std::max(2, qFloor(plot.width() / 78));
+        for (int tick = 0; tick <= horizontalTicks; ++tick) {
+            const double ratio = double(tick) / horizontalTicks;
+            const double x = plot.left() + ratio * plot.width();
+            painter.setPen(grid);
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+            if (lane == lanes - 1) {
+                QString label = QString::number(view.time.low + ratio * view.time.span(), 'g', 7);
+                if (separate && tick == horizontalTicks)
+                    label += " 秒";
+                painter.setPen(colors.muted);
+                const qreal halfLabel = painter.fontMetrics().horizontalAdvance(label) / 2.0;
+                const qreal center = std::min(x, chart.right() - halfLabel - 4);
+                painter.drawText(QRectF(center - 38, plot.bottom() + 4, 76, 15), Qt::AlignCenter, label);
+            }
+        }
+        const int verticalTicks = separate ? std::clamp(qFloor(plot.height() / 25), 1, 4) : 4;
+        const qreal valueLabelLeft = chart.left() + (separate ? 39 : 2);
+        for (int tick = 0; tick <= verticalTicks; ++tick) {
+            const double ratio = double(tick) / verticalTicks;
+            const double y = plot.bottom() - ratio * plot.height();
+            painter.setPen(grid);
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+            painter.setPen(colors.muted);
+            painter.drawText(QRectF(valueLabelLeft, y - 8, plot.left() - valueLabelLeft - 5, 16), Qt::AlignRight | Qt::AlignVCenter,
+                             QString::number(view.value.low + ratio * view.value.span(), 'g', 5));
+        }
+        if (separate) {
+            painter.setPen(waveformChannelColor(lane, colors));
+            painter.drawText(QRectF(chart.left() + 8, plot.top(), 28, plot.height()), Qt::AlignVCenter | Qt::AlignLeft,
+                             QString("CH%1").arg(lane + 1));
+        }
+
+        painter.save();
+        painter.setClipRect(plot);
+        painter.setBrush(Qt::NoBrush);
+        const int first = separate ? lane : 0;
+        const int end = separate ? lane + 1 : channels;
+        for (int channel = first; channel < end; ++channel)
+            paintTrace(painter, plot, view, frame.traces.at(channel), waveformChannelColor(channel, colors));
+        if (!frame.hasSamples) {
+            painter.setPen(colors.muted);
+            painter.drawText(plot, Qt::AlignCenter, "等待样本");
+        }
+        painter.restore();
     }
 
-    painter.save();
-    painter.setClipRect(plot);
-    painter.setBrush(Qt::NoBrush);
-    for (int channel = 0; channel < channels; ++channel) {
-        const auto &points = frame.traces.at(channel);
-        if (points.isEmpty())
-            continue;
-        const auto position = [&](QPointF point) {
-            const double x = std::clamp((point.x() - view.time.low) / view.time.span(), -64.0, 65.0);
-            const double y = std::clamp((point.y() - view.value.low) / view.value.span(), -64.0, 65.0);
-            return QPointF(plot.left() + x * plot.width(), plot.bottom() - y * plot.height());
-        };
-        QPainterPath trace(position(points.first()));
-        for (qsizetype i = 1; i < points.size(); ++i)
-            trace.lineTo(position(points.at(i)));
-        painter.setPen(QPen(waveformChannelColor(channel, colors), 1.35));
-        if (points.size() == 1)
-            painter.drawEllipse(trace.currentPosition(), 1.7, 1.7);
-        else
-            painter.drawPath(trace);
-    }
-    if (!frame.hasSamples) {
+    if (!separate) {
+        const QRectF plot = waveformPlotRect(chart, lanes);
+        const qreal legendWidth = std::min<qreal>(36, (plot.width() - 22) / std::max(1, channels));
+        for (int channel = 0; channel < channels; ++channel) {
+            const double x = plot.left() + channel * legendWidth;
+            painter.setPen(waveformChannelColor(channel, colors));
+            painter.drawText(QRectF(x, chart.bottom() - 22, legendWidth, 16), Qt::AlignLeft | Qt::AlignVCenter, QString("CH%1").arg(channel + 1));
+        }
         painter.setPen(colors.muted);
-        painter.drawText(plot, Qt::AlignCenter, "等待样本");
+        painter.drawText(QRectF(plot.right() - 22, chart.bottom() - 22, 22, 16), Qt::AlignRight | Qt::AlignVCenter, "秒");
     }
-    painter.restore();
-
-    const qreal legendWidth = std::min<qreal>(36, (plot.width() - 22) / std::max<qsizetype>(1, channels));
-    for (int channel = 0; channel < channels; ++channel) {
-        const double x = plot.left() + channel * legendWidth;
-        painter.setPen(waveformChannelColor(channel, colors));
-        painter.drawText(QRectF(x, chart.bottom() - 22, legendWidth, 16), Qt::AlignLeft | Qt::AlignVCenter, QString("CH%1").arg(channel + 1));
-    }
-    painter.setPen(colors.muted);
-    painter.drawText(QRectF(plot.right() - 22, chart.bottom() - 22, 22, 16), Qt::AlignRight | Qt::AlignVCenter, "秒");
     painter.restore();
 }
 
 bool saveWaveformImage(const QString &path, QSizeF size, const WaveformRecording &recording,
-                       const WaveformView &view, int channels, const ThemeColors &colors, QString &error)
+                       const WaveformView &view, int channels, WaveformLayout layout, const ThemeColors &colors, QString &error)
 {
     constexpr double maxExportPixels = 64000000;
     const double scale = std::min(300.0 / 96.0, std::sqrt(maxExportPixels / (size.width() * size.height())));
@@ -385,8 +439,9 @@ bool saveWaveformImage(const QString &path, QSizeF size, const WaveformRecording
     QPainter painter(&image);
     painter.scale(scale, scale);
     const QRectF chart(QPointF(), size);
-    const auto frame = waveformFrame(recording, view, channels, std::max(1, qRound(waveformPlotRect(chart).width() * scale)));
-    paintWaveform(painter, chart, frame, colors);
+    const int lanes = layout == WaveformLayout::Separate ? channels : 1;
+    const auto frame = waveformFrame(recording, view, channels, std::max(1, qRound(waveformPlotRect(chart, lanes).width() * scale)));
+    paintWaveform(painter, chart, frame, layout, colors);
     painter.end();
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {

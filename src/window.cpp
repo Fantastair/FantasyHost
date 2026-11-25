@@ -32,6 +32,7 @@
 #include <QSerialPortInfo>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QStyleHints>
@@ -863,7 +864,23 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
     auto *fit = new QPushButton("显示全部数据", section);
     fit->setObjectName("fitRecording");
     connect(fit, &QPushButton::clicked, canvas, [this, id] { canvas->fitRecording(id); });
-    layout->addWidget(fit);
+    auto *clear = new QPushButton("清除记录", section);
+    clear->setObjectName("clearRecording");
+    connect(clear, &QPushButton::clicked, this, [this, id] {
+        QMessageBox confirmation(QMessageBox::Question, "清除波形记录", "清除所有通道已记录的样本？新样本将从零开始记录。",
+                                 QMessageBox::NoButton, this);
+        auto *confirm = confirmation.addButton("清除记录", QMessageBox::DestructiveRole);
+        auto *cancel = confirmation.addButton("取消", QMessageBox::RejectRole);
+        confirmation.setDefaultButton(cancel);
+        confirmation.setEscapeButton(cancel);
+        confirmation.exec();
+        if (confirmation.clickedButton() == confirm)
+            canvas->clearRecording(id);
+    });
+    auto *viewActions = new QHBoxLayout;
+    viewActions->addWidget(fit);
+    viewActions->addWidget(clear);
+    layout->addLayout(viewActions);
 
     auto *actions = new QHBoxLayout;
     auto *csv = new QPushButton("导出 CSV", section);
@@ -878,9 +895,10 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
     layout->addLayout(actions);
     layout->addWidget(wrappedLabel("滚轮缩放纵轴，Ctrl 平移纵轴。横向滚轮或 Shift 平移时间轴，Alt 缩放时间轴。", section));
 
-    const auto update = [samples, fit, csv, png](qint64 count) {
+    const auto update = [samples, fit, clear, csv, png](qint64 count) {
         samples->setText(QString("已记录 %1 个样本").arg(QLocale().toString(count)));
         fit->setEnabled(count > 0);
+        clear->setEnabled(count > 0);
         csv->setEnabled(count > 0);
         png->setEnabled(count > 0);
     };
@@ -894,15 +912,33 @@ void MainWindow::createRecorderControls(QWidget *pane, const QUuid &id)
 
 void MainWindow::exportRecording(const QUuid &id, bool image)
 {
-    QFileDialog dialog(this, image ? "导出当前波形视图" : "导出全部波形数据", {},
-                       image ? "PNG 图像 (*.png)" : "CSV 文件 (*.csv)");
+    const QString suffix = image ? "png" : "csv";
+    QString directory = recordingExportDirectory;
+    if (!QFileInfo(directory).isDir())
+        directory = QStandardPaths::writableLocation(image ? QStandardPaths::PicturesLocation : QStandardPaths::DocumentsLocation);
+    if (!QFileInfo(directory).isDir())
+        directory = QDir::homePath();
+
+    QFileDialog dialog(this);
+    // Let the export itself check write access instead of the Windows Shell save dialog.
+    dialog.setOption(QFileDialog::DontUseNativeDialog);
+    dialog.setWindowTitle(image ? "导出当前波形视图" : "导出全部波形数据");
     dialog.setAcceptMode(QFileDialog::AcceptSave);
-    dialog.setDefaultSuffix(image ? "png" : "csv");
-    dialog.selectFile(image ? "waveform.png" : "waveform.csv");
+    dialog.setNameFilter(image ? "PNG 图像 (*.png)" : "CSV 文件 (*.csv)");
+    dialog.setLabelText(QFileDialog::LookIn, "保存位置");
+    dialog.setLabelText(QFileDialog::FileName, "文件名");
+    dialog.setLabelText(QFileDialog::FileType, "文件类型");
+    dialog.setLabelText(QFileDialog::Accept, "保存");
+    dialog.setLabelText(QFileDialog::Reject, "取消");
+    dialog.setDirectory(directory);
+    dialog.setDefaultSuffix(suffix);
+    dialog.selectFile("waveform." + suffix);
     if (!dialog.exec())
         return;
     const QString path = dialog.selectedFiles().first();
-    QString destination = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    const QFileInfo target(path);
+    recordingExportDirectory = target.absolutePath();
+    QString destination = QDir::cleanPath(target.absoluteFilePath());
 #ifdef Q_OS_WIN
     destination = destination.toCaseFolded();
 #endif
@@ -910,6 +946,12 @@ void MainWindow::exportRecording(const QUuid &id, bool image)
         statusBar()->showMessage("此文件正在导出，请选择其他文件。", 4500);
         return;
     }
+    const auto reportError = [this, path](const QString &error) {
+        QMessageBox message(QMessageBox::Warning, "无法导出波形", {}, QMessageBox::Ok, this);
+        message.setTextFormat(Qt::PlainText);
+        message.setText(QString("无法保存文件 %1\n\n%2").arg(QDir::toNativeSeparators(path), error));
+        message.exec();
+    };
     if (!image) {
         struct ExportResult { bool success = false; QString error; };
         const auto result = std::make_shared<ExportResult>();
@@ -918,12 +960,12 @@ void MainWindow::exportRecording(const QUuid &id, bool image)
         });
         activeCsvDestinations.insert(destination);
         worker->setParent(this);
-        connect(worker, &QThread::finished, this, [this, result, destination] {
+        connect(worker, &QThread::finished, this, [this, result, destination, reportError] {
             activeCsvDestinations.remove(destination);
             if (result->success)
                 statusBar()->showMessage("全部采样数据已导出", 4500);
             else
-                QMessageBox::warning(this, "无法导出波形", result->error);
+                reportError(result->error);
         });
         connect(worker, &QThread::finished, worker, &QObject::deleteLater);
         worker->start();
@@ -932,7 +974,7 @@ void MainWindow::exportRecording(const QUuid &id, bool image)
     }
     QString error;
     if (!canvas->exportRecordingImage(id, path, error)) {
-        QMessageBox::warning(this, "无法导出波形", error);
+        reportError(error);
         return;
     }
     statusBar()->showMessage("当前波形视图已导出", 4500);

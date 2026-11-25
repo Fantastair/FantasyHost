@@ -87,6 +87,7 @@ private:
     QTimer serialPreviewTimer;
     QUuid inspectedNode;
     QString projectPath;
+    QString recordingExportDirectory;
     QList<std::pair<QAction *, WorkspaceIcon>> actionIcons;
     QList<std::pair<QToolButton *, WorkspaceIcon>> dockIcons;
     Appearance appearance = Appearance::System;

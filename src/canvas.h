@@ -36,6 +36,7 @@ public:
     void rearmScope(const QUuid &id);
     qint64 recordingSampleCount(const QUuid &id) const;
     void fitRecording(const QUuid &id);
+    void clearRecording(const QUuid &id);
     WaveformCsvSnapshot recordingCsv(const QUuid &id) const;
     bool exportRecordingImage(const QUuid &id, const QString &path, QString &error) const;
     void setTheme(const ThemeColors &theme);
