@@ -707,9 +707,16 @@ void MainWindow::refreshInspector()
                 continue;
             const QString mode = node->parameters.value("filterMode").toString();
             const bool band = mode == "bandpass" || mode == "bandstop";
-            if (((band || mode == "bypass") && parameter.id == "cutoff")
-                || (!band && (parameter.id == "bandLow" || parameter.id == "bandHigh"))
-                || (mode == "bypass" && parameter.id == "tapCount"))
+            const bool notch = mode == "notch";
+            const bool bypass = mode == "bypass";
+            if (notch && (parameter.id == "cutoff" || parameter.id == "tapCount"
+                          || parameter.id == "bandLow" || parameter.id == "bandHigh"))
+                continue;
+            if (!notch && (parameter.id == "notchFrequency" || parameter.id == "notchQ"))
+                continue;
+            if (((band || bypass) && parameter.id == "cutoff")
+                || (!band && !notch && (parameter.id == "bandLow" || parameter.id == "bandHigh"))
+                || (bypass && parameter.id == "tapCount"))
                 continue;
         }
         const QJsonValue current = node->parameters.value(parameter.id);

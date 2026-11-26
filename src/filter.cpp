@@ -15,22 +15,26 @@ namespace {
 constexpr double pi = 3.14159265358979323846;
 const QString bundledPort = QStringLiteral("waveform");
 
-enum class Mode { LowPass, HighPass, BandPass, BandStop, Bypass };
+enum class Mode { LowPass, HighPass, BandPass, BandStop, Bypass, Notch };
 
 struct Settings {
     Mode mode;
     double low;
     double high;
     int taps;
+    double center = 50;
+    double quality = 20;
 
     bool band() const { return mode == Mode::BandPass || mode == Mode::BandStop; }
+    bool secondOrder() const { return mode == Mode::Notch; }
 };
 
 Settings readSettings(const QJsonObject &parameters)
 {
     const QString type = parameters.value("filterMode").toString();
     const auto mode = type == "highpass" ? Mode::HighPass : type == "bandpass" ? Mode::BandPass
-        : type == "bandstop" ? Mode::BandStop : type == "bypass" ? Mode::Bypass : Mode::LowPass;
+        : type == "bandstop" ? Mode::BandStop : type == "bypass" ? Mode::Bypass
+        : type == "notch" ? Mode::Notch : Mode::LowPass;
     const double cutoff = parameters.value("cutoff").toDouble(100);
     const int taps = parameters.value("tapCount").toString().toInt();
     Settings settings{mode, cutoff, cutoff, taps >= 31 && taps <= 511 && taps % 2 == 1 ? taps : 127};
@@ -38,7 +42,50 @@ Settings readSettings(const QJsonObject &parameters)
         settings.low = parameters.value("bandLow").toDouble(45);
         settings.high = parameters.value("bandHigh").toDouble(55);
     }
+    settings.center = std::clamp(parameters.value("notchFrequency").toDouble(50), 0.01, 500000.0);
+    settings.quality = std::clamp(parameters.value("notchQ").toDouble(20), 0.1, 200.0);
     return settings;
+}
+
+// RBJ 2nd-order notch. Unity gain at DC and Nyquist, zero exactly at the centre.
+struct Biquad {
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+
+    static Biquad notch(double centre, double quality, double rate)
+    {
+        const double frequency = std::min(centre, rate * 0.499);
+        const double w = 2 * pi * frequency / rate;
+        const double alpha = std::sin(w) / (2 * quality);
+        const double a0 = 1 + alpha;
+        Biquad filter;
+        filter.b0 = 1 / a0;
+        filter.b1 = -2 * std::cos(w) / a0;
+        filter.b2 = 1 / a0;
+        filter.a1 = -2 * std::cos(w) / a0;
+        filter.a2 = (1 - alpha) / a0;
+        return filter;
+    }
+
+    void reset() { x1 = x2 = y1 = y2 = 0; }
+
+    double push(double x)
+    {
+        const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x;
+        y2 = y1;
+        y1 = y;
+        return y;
+    }
+};
+
+// Number of samples worth running before the requested window so the IIR state has settled.
+double settlingSamples(const Settings &settings, double interval)
+{
+    if (!(interval > 0)) return 0;
+    const double time = settings.quality / (pi * std::max(settings.center, 1e-9));
+    return std::max(16.0, 10 * time / interval);
 }
 
 double lowPass(double cyclesPerSample, int offset)
@@ -143,6 +190,26 @@ struct Track {
     QString issue;
 };
 
+QList<QPointF> notchSamples(const WaveformViewport &input, int channel, qint64 offset, qsizetype count,
+                           const Settings &settings, double interval)
+{
+    const qsizetype warmup = qsizetype(std::ceil(settlingSamples(settings, interval)));
+    const qsizetype prefix = std::min<qint64>(offset, warmup);
+    const auto samples = input.readChannel(channel, offset - prefix, count + prefix);
+    if (samples.size() < count)
+        return {};
+    Biquad filter = Biquad::notch(settings.center, settings.quality, 1 / interval);
+    QList<QPointF> result;
+    result.reserve(count);
+    const qsizetype first = samples.size() - count;
+    for (qsizetype index = 0; index < samples.size(); ++index) {
+        const double value = filter.push(samples.at(index).y());
+        if (index >= first)
+            result.append({samples.at(index).x(), value});
+    }
+    return result;
+}
+
 Track createTrack(const WaveformPacket &input, int source, int displayChannel, const Settings &settings)
 {
     const qint64 size = input->sampleCount(source);
@@ -155,6 +222,15 @@ Track createTrack(const WaveformPacket &input, int source, int displayChannel, c
     const double interval = tail.size() == 2 ? intervalBetween(tail.first(), tail.last()) : 0;
     if (!(interval > 0))
         return {{}, label + " 无法确定采样率"};
+    if (settings.secondOrder()) {
+        if (settings.center * interval >= 0.5)
+            return {{}, QString("%1 的陷波频率须低于 %2 Hz").arg(label, QString::number(0.5 / interval, 'g', 8))};
+        auto notch = std::make_shared<const WaveformViewport::ReadSamples>(
+            [input, source, settings, interval](qint64 offset, qsizetype count) {
+                return notchSamples(*input, source, offset, count, settings, interval);
+            });
+        return {std::move(notch), {}};
+    }
     if (settings.high * interval >= 0.5)
         return {{}, QString("%1 的截止频率须低于 %2 Hz").arg(label, QString::number(0.5 / interval, 'g', 8))};
     auto reader = std::make_shared<const WaveformViewport::ReadSamples>(
@@ -191,16 +267,22 @@ void appendFloat(QByteArray &buffer, double value)
     buffer.append(bytes, sizeof(bytes));
 }
 
-// Causal FIR over a live sample stream. The symmetric kernel used for viewports gives the
-// same magnitude response here, delayed by (taps - 1) / 2 samples.
+// Causal FIR (or IIR notch) over a live sample stream. The symmetric kernel used for viewports
+// gives the same magnitude response here, delayed by (taps - 1) / 2 samples.
 class StreamFilter {
 public:
     void configure(const Settings &settings, double rate)
     {
-        taps.assign(settings.taps, 0.0);
-        if (settings.mode == Mode::Bypass) {
+        secondOrder = settings.secondOrder();
+        taps.clear();
+        if (secondOrder) {
+            const Biquad prototype = Biquad::notch(settings.center, settings.quality, rate);
+            for (auto &filter : biquads)
+                filter = prototype;
+        } else if (settings.mode == Mode::Bypass) {
             taps.assign(1, 1.0);
         } else {
+            taps.assign(settings.taps, 0.0);
             const int half = settings.taps / 2;
             const auto weights = kernel(settings, 1.0 / rate);
             for (int offset = 0; offset <= half; ++offset) {
@@ -213,14 +295,18 @@ public:
 
     void reset()
     {
+        for (auto &filter : biquads)
+            filter.reset();
         for (auto &window : windows)
             window.assign(taps.size(), 0.0);
     }
 
-    bool empty() const { return taps.empty(); }
+    bool empty() const { return taps.empty() && !secondOrder; }
 
     double push(int channel, double value)
     {
+        if (secondOrder)
+            return biquads[channel].push(value);
         std::vector<double> &window = windows[channel];
         if (window.size() > 1)
             std::memmove(window.data() + 1, window.data(), (window.size() - 1) * sizeof(double));
@@ -232,8 +318,10 @@ public:
     }
 
 private:
+    std::array<Biquad, maxScopeChannels> biquads;
     std::array<std::vector<double>, maxScopeChannels> windows;
     std::vector<double> taps;
+    bool secondOrder = false;
 };
 
 class WaveformFilter final : public Module {
@@ -467,6 +555,14 @@ private:
                 io.report("下限频率必须小于上限频率");
                 return;
             }
+            if (settings.secondOrder()) {
+                if (settings.center * 2 >= rate)
+                    io.report(QString("陷波频率须低于 %1 Hz").arg(QString::number(rate / 2, 'g', 8)));
+                else
+                    io.report(QString("流式 · 陷波 %1 Hz · Q%2")
+                                  .arg(QString::number(settings.center, 'g', 8), QString::number(settings.quality, 'g', 4)));
+                return;
+            }
             if (settings.high * 2 >= rate)
                 io.report(QString("截止频率须低于 %1 Hz").arg(QString::number(rate / 2, 'g', 8)));
             else
@@ -491,7 +587,11 @@ private:
                     issue = track.issue;
             }
         }
-        QString status = active ? QString("%1 路 · FIR %2 抽头").arg(active).arg(settings.taps) : QString("等待波形样本");
+        QString status = active
+            ? (settings.secondOrder()
+                   ? QString("%1 路 · 陷波 %2 Hz").arg(active).arg(QString::number(settings.center, 'g', 8))
+                   : QString("%1 路 · FIR %2 抽头").arg(active).arg(settings.taps))
+            : QString("等待波形样本");
         if (!issue.isEmpty())
             status = active ? status + " · " + issue : issue;
         io.report(status);
@@ -537,12 +637,15 @@ ModuleDefinition filterDefinition()
              {"u16le", "UInt16 LE"}, {"f32le", "Float32 LE"}}},
         {"sampleRate", "采样率 (Hz)", ParameterKind::Number, 1000, 1, 1000000, 0, true, false, {}},
         {"filterMode", "滤波类型", ParameterKind::Choice, "lowpass", 0, 0, 0, true, false,
-            {{"lowpass", "低通"}, {"highpass", "高通"}, {"bandpass", "带通"}, {"bandstop", "带阻"}, {"bypass", "旁路"}}},
+            {{"lowpass", "低通"}, {"highpass", "高通"}, {"bandpass", "带通"}, {"bandstop", "带阻"},
+             {"notch", "陷波 (IIR)"}, {"bypass", "旁路"}}},
         {"cutoff", "截止频率 (Hz)", ParameterKind::Number, 100, 0.01, 500000, 2, true, false, {}},
         {"bandLow", "下限频率 (Hz)", ParameterKind::Number, 45, 0.01, 500000, 2, true, false, {}},
         {"bandHigh", "上限频率 (Hz)", ParameterKind::Number, 55, 0.01, 500000, 2, true, false, {}},
         {"tapCount", "FIR 抽头数", ParameterKind::Choice, "127", 0, 0, 0, true, false,
             {{"31", "31"}, {"63", "63"}, {"127", "127"}, {"255", "255"}, {"511", "511"}}},
+        {"notchFrequency", "陷波中心 (Hz)", ParameterKind::Number, 50, 0.01, 500000, 2, true, false, {}},
+        {"notchQ", "品质因数 Q", ParameterKind::Number, 20, 0.1, 200, 1, true, false, {}},
     }, [](ModuleCallbacks callbacks) -> std::unique_ptr<Module> { return std::make_unique<WaveformFilter>(std::move(callbacks)); },
         [](const QJsonObject &parameters) { return filterPorts(parameters, false); },
         false, false, false, false, [](const QJsonObject &parameters) { return filterPorts(parameters, true); }};
