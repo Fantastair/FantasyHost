@@ -1,9 +1,13 @@
 #include "filter.h"
 #include "waveform.h"
 
+#include <QByteArray>
+#include <QtEndian>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -162,12 +166,87 @@ Track createTrack(const WaveformPacket &input, int source, int displayChannel, c
 
 bool separateChannels(const QJsonObject &parameters) { return parameters.value("inputLayout") == "ports"; }
 
+bool streamMode(const QJsonObject &parameters) { return parameters.value("processType").toString() == "stream"; }
+
+int streamChannels(const QJsonObject &parameters)
+{
+    return std::clamp(parameters.value("channels").toInt(1), 1, maxScopeChannels);
+}
+
+double streamRate(const QJsonObject &parameters)
+{
+    const double rate = parameters.value("sampleRate").toDouble(1000);
+    return rate >= 1 ? rate : 1000;
+}
+
+bool usableSample(double value) { return std::isfinite(value) && std::abs(value) <= 1e100; }
+
+void appendFloat(QByteArray &buffer, double value)
+{
+    const float sample = static_cast<float>(value);
+    quint32 bits = 0;
+    std::memcpy(&bits, &sample, sizeof(bits));
+    char bytes[sizeof(bits)];
+    qToLittleEndian(bits, bytes);
+    buffer.append(bytes, sizeof(bytes));
+}
+
+// Causal FIR over a live sample stream. The symmetric kernel used for viewports gives the
+// same magnitude response here, delayed by (taps - 1) / 2 samples.
+class StreamFilter {
+public:
+    void configure(const Settings &settings, double rate)
+    {
+        taps.assign(settings.taps, 0.0);
+        if (settings.mode == Mode::Bypass) {
+            taps.assign(1, 1.0);
+        } else {
+            const int half = settings.taps / 2;
+            const auto weights = kernel(settings, 1.0 / rate);
+            for (int offset = 0; offset <= half; ++offset) {
+                taps[half + offset] = weights[offset];
+                taps[half - offset] = weights[offset];
+            }
+        }
+        reset();
+    }
+
+    void reset()
+    {
+        for (auto &window : windows)
+            window.assign(taps.size(), 0.0);
+    }
+
+    bool empty() const { return taps.empty(); }
+
+    double push(int channel, double value)
+    {
+        std::vector<double> &window = windows[channel];
+        if (window.size() > 1)
+            std::memmove(window.data() + 1, window.data(), (window.size() - 1) * sizeof(double));
+        window[0] = value;
+        double sum = 0.0;
+        for (size_t tap = 0; tap < taps.size(); ++tap)
+            sum += taps[tap] * window[tap];
+        return sum;
+    }
+
+private:
+    std::array<std::vector<double>, maxScopeChannels> windows;
+    std::vector<double> taps;
+};
+
 class WaveformFilter final : public Module {
 public:
     explicit WaveformFilter(ModuleCallbacks callbacks) : Module(std::move(callbacks)) {}
 
     void receive(const QString &port, const Packet &packet) override
     {
+        if (streamMode(parameters)) {
+            if (const auto *bytes = std::get_if<QByteArray>(&packet))
+                receiveStream(port, *bytes);
+            return;
+        }
         Slot *slot = inputSlot(port);
         const auto *waveform = std::get_if<WaveformPacket>(&packet);
         if (!slot || !waveform || (separateChannels(parameters) && *waveform && (*waveform)->channelCount() != 1))
@@ -179,6 +258,12 @@ public:
 
     void resetInput(const QString &port) override
     {
+        if (streamMode(parameters)) {
+            stream.reset();
+            tail.clear();
+            discardLine = false;
+            return;
+        }
         if (Slot *slot = inputSlot(port)) {
             *slot = {};
             io.publish(port, WaveformPacket{});
@@ -195,6 +280,8 @@ public:
     }
 
 private:
+    using Frame = std::array<double, maxScopeChannels>;
+
     struct Slot {
         WaveformPacket input;
         WaveformPacket output;
@@ -218,6 +305,15 @@ private:
     void parametersChanged(const QJsonObject &previous) override
     {
         settings = readSettings(parameters);
+        if (streamMode(parameters)) {
+            stream.configure(settings, streamRate(parameters));
+            tail.clear();
+            discardLine = false;
+            invalid = 0;
+            slotsByChannel = {};
+            reportStatus();
+            return;
+        }
         if (separateChannels(previous) != separateChannels(parameters)) {
             slotsByChannel = {};
         } else {
@@ -256,8 +352,127 @@ private:
         io.publish(port, slot.output);
     }
 
+    void receiveStream(const QString &port, const QByteArray &bytes)
+    {
+        const int count = streamChannels(parameters);
+        const bool interleaved = !separateChannels(parameters);
+        const int channel = interleaved ? 0 : channelPortIndex(port);
+        if (channel < 0 || channel >= count || port != channelPortId(channel))
+            return;
+        const int width = interleaved ? count : 1;
+        QList<Frame> frames;
+        decode(bytes, width, frames);
+        std::array<QByteArray, maxScopeChannels> output;
+        for (const Frame &frame : frames) {
+            if (interleaved) {
+                for (int index = 0; index < count; ++index)
+                    appendFloat(output[0], stream.push(index, frame[index]));
+            } else {
+                appendFloat(output[channel], stream.push(channel, frame[0]));
+            }
+        }
+        for (int index = 0; index < count; ++index) {
+            if (!output[index].isEmpty())
+                io.publish(channelPortId(index), output[index]);
+        }
+        if (invalid != reportedInvalid) {
+            reportedInvalid = invalid;
+            io.report(QString("已跳过 %1 帧无效数据").arg(invalid));
+        }
+    }
+
+    void decode(const QByteArray &bytes, int width, QList<Frame> &frames)
+    {
+        const QString format = parameters.value("encoding").toString();
+        if (format == "text") {
+            for (const char byte : bytes) {
+                if (byte == '\n') {
+                    if (!discardLine)
+                        parseLine(tail, width, frames);
+                    tail.clear();
+                    discardLine = false;
+                } else if (!discardLine) {
+                    if (tail.size() < 256) {
+                        tail.append(byte);
+                    } else {
+                        ++invalid;
+                        tail.clear();
+                        discardLine = true;
+                    }
+                }
+            }
+            return;
+        }
+        const bool byteFormat = format == "u8";
+        const bool floatFormat = format == "f32le";
+        const bool unsignedFormat = format == "u16le";
+        const int sampleBytes = byteFormat ? 1 : floatFormat ? 4 : 2;
+        const int frameBytes = sampleBytes * width;
+        const QByteArray block = tail + bytes;
+        qsizetype offset = 0;
+        for (; offset + frameBytes <= block.size(); offset += frameBytes) {
+            Frame frame{};
+            for (int index = 0; index < width; ++index) {
+                const char *sample = block.constData() + offset + sampleBytes * index;
+                if (byteFormat) {
+                    frame[index] = static_cast<quint8>(*sample);
+                } else if (floatFormat) {
+                    const quint32 bits = qFromLittleEndian<quint32>(sample);
+                    float value = 0;
+                    std::memcpy(&value, &bits, sizeof(value));
+                    frame[index] = value;
+                } else if (unsignedFormat) {
+                    frame[index] = qFromLittleEndian<quint16>(sample);
+                } else {
+                    frame[index] = qFromLittleEndian<qint16>(sample);
+                }
+            }
+            frames.append(frame);
+        }
+        tail = block.mid(offset);
+    }
+
+    void parseLine(QByteArray line, int width, QList<Frame> &frames)
+    {
+        line = line.trimmed();
+        if (line.isEmpty())
+            return;
+        line.replace(';', ',');
+        const QList<QByteArray> fields = line.contains(',') ? line.split(',') : line.simplified().split(' ');
+        if (fields.size() != width) {
+            ++invalid;
+            return;
+        }
+        Frame frame{};
+        for (int index = 0; index < width; ++index) {
+            bool ok = false;
+            frame[index] = fields[index].trimmed().toDouble(&ok);
+            if (!ok || !usableSample(frame[index])) {
+                ++invalid;
+                return;
+            }
+        }
+        frames.append(frame);
+    }
+
     void reportStatus() const
     {
+        if (streamMode(parameters)) {
+            if (settings.mode == Mode::Bypass) {
+                io.report("流式 · 旁路");
+                return;
+            }
+            const double rate = streamRate(parameters);
+            if (settings.band() && settings.low >= settings.high) {
+                io.report("下限频率必须小于上限频率");
+                return;
+            }
+            if (settings.high * 2 >= rate)
+                io.report(QString("截止频率须低于 %1 Hz").arg(QString::number(rate / 2, 'g', 8)));
+            else
+                io.report(QString("流式 · FIR %1 抽头 · %2 Hz").arg(settings.taps).arg(QString::number(rate, 'g', 8)));
+            return;
+        }
         if (settings.mode == Mode::Bypass) {
             io.report("旁路 · 原样转发");
             return;
@@ -284,10 +499,22 @@ private:
 
     Settings settings{Mode::LowPass, 100, 100, 127};
     std::array<Slot, maxScopeChannels> slotsByChannel;
+    StreamFilter stream;
+    QByteArray tail;
+    bool discardLine = false;
+    qint64 invalid = 0, reportedInvalid = 0;
 };
 
 QList<PortDefinition> filterPorts(const QJsonObject &parameters, bool output)
 {
+    if (streamMode(parameters)) {
+        if (!separateChannels(parameters))
+            return {{channelPortId(0), output ? "滤波采样" : "采样", DataType::Bytes}};
+        QList<PortDefinition> ports;
+        for (int channel = 0; channel < streamChannels(parameters); ++channel)
+            ports.append({channelPortId(channel), QString("CH%1").arg(channel + 1), DataType::Bytes});
+        return ports;
+    }
     if (!separateChannels(parameters))
         return {{bundledPort, output ? "滤波波形" : "波形", DataType::Waveform}};
     QList<PortDefinition> ports;
@@ -299,10 +526,16 @@ QList<PortDefinition> filterPorts(const QJsonObject &parameters, bool output)
 
 ModuleDefinition filterDefinition()
 {
-    return {"filter", "滤波器", "接在波形记录器（视口输出）和频谱分析仪之间，对当前视口的波形逐通道滤波并输出处理后的采样。", {}, {}, {
+    return {"filter", "滤波器", "对接入的采样逐通道滤波。视口模式接在波形记录器和频谱分析仪之间；流式模式接在串口或采集卡与波形记录器之间，输出为 Float32 LE。", {}, {}, {
+        {"processType", "处理对象", ParameterKind::Choice, "waveform", 0, 0, 0, true, true,
+            {{"waveform", "视口波形"}, {"stream", "流式采样"}}},
         {"inputLayout", "接线布局", ParameterKind::Choice, "frame", 0, 0, 0, true, true,
             {{"frame", "合并多通道"}, {"ports", "逐通道接线"}}},
         {"channels", "通道数", ParameterKind::Number, 2, 1, maxScopeChannels, 0, true, true, {}},
+        {"encoding", "样本格式", ParameterKind::Choice, "f32le", 0, 0, 0, true, false,
+            {{"text", "按行文本数值"}, {"u8", "UInt8"}, {"i16le", "Int16 LE"},
+             {"u16le", "UInt16 LE"}, {"f32le", "Float32 LE"}}},
+        {"sampleRate", "采样率 (Hz)", ParameterKind::Number, 1000, 1, 1000000, 0, true, false, {}},
         {"filterMode", "滤波类型", ParameterKind::Choice, "lowpass", 0, 0, 0, true, false,
             {{"lowpass", "低通"}, {"highpass", "高通"}, {"bandpass", "带通"}, {"bandstop", "带阻"}, {"bypass", "旁路"}}},
         {"cutoff", "截止频率 (Hz)", ParameterKind::Number, 100, 0.01, 500000, 2, true, false, {}},

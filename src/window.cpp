@@ -698,10 +698,13 @@ void MainWindow::refreshInspector()
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     for (const ParameterDefinition &parameter : definition.parameters) {
-        if ((definition.displaysSpectrum || definition.id == "filter") && parameter.id == "channels"
+        const bool stream = definition.id == "filter" && node->parameters.value("processType").toString() == "stream";
+        if ((definition.displaysSpectrum || (definition.id == "filter" && !stream)) && parameter.id == "channels"
             && node->parameters.value("inputLayout") != "ports")
             continue;
         if (definition.id == "filter") {
+            if (!stream && (parameter.id == "encoding" || parameter.id == "sampleRate"))
+                continue;
             const QString mode = node->parameters.value("filterMode").toString();
             const bool band = mode == "bandpass" || mode == "bandstop";
             if (((band || mode == "bypass") && parameter.id == "cutoff")
