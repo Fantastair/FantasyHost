@@ -58,6 +58,7 @@ Q_SIGNALS:
     void recordingUpdated(const QUuid &id, qint64 samples);
     void recordingFollowChanged(const QUuid &id, bool following);
     void recordingViewportChanged(const QUuid &id);
+    void controlActivated(const QUuid &id, ControlCommand command);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);
 #endif

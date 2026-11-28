@@ -176,6 +176,13 @@ bool GraphRunner::sendManual(const QUuid &id, const QString &text, QString &erro
     return modules.at(id).module->sendManual(text, error);
 }
 
+bool GraphRunner::triggerControl(const QUuid &id, ControlCommand command)
+{
+    const auto entry = modules.find(id);
+    return entry != modules.end() && entry->second.active && !entry->second.closing
+        && entry->second.module->triggerControl(command);
+}
+
 void GraphRunner::publish(const QUuid &id, const QString &output, const Packet &packet)
 {
     const auto source = modules.find(id);

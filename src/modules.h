@@ -13,13 +13,17 @@
 class WaveformViewport;
 struct SpectrumFrame;
 
-enum class DataType { Bytes, Number, Waveform, WaveformChannel, Any };
+enum class DataType { Bytes, Number, Waveform, WaveformChannel, Any, Control };
 enum class ParameterKind { Number, SerialPort, Choice, TextTemplate };
+enum class ControlCommand { Start, Pause, Resume, Stop };
 using WaveformPacket = std::shared_ptr<const WaveformViewport>;
-using Packet = std::variant<QByteArray, double, WaveformPacket>;
+using Packet = std::variant<QByteArray, double, WaveformPacket, ControlCommand>;
 inline const QString waveformViewportPort = QStringLiteral("viewport");
+inline const QString controlPort = QStringLiteral("control");
 QString channelPortId(int channel);
 int channelPortIndex(const QString &id);
+QList<ControlCommand> controlCommands(const QJsonObject &parameters);
+QString controlCommandLabel(ControlCommand command);
 
 struct PortDefinition {
     QString id;
@@ -65,6 +69,7 @@ public:
     virtual void resetInput(const QString &) {}
     virtual std::optional<Packet> currentOutput(const QString &) const { return std::nullopt; }
     virtual bool sendManual(const QString &, QString &error) { error = "此模块不支持手动发送。"; return false; }
+    virtual bool triggerControl(ControlCommand) { return false; }
     void setParameters(const QJsonObject &values);
 
 protected:

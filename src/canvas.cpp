@@ -8,6 +8,7 @@
 #include <QCursor>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
+#include <QGraphicsSceneMouseEvent>
 #include <QHelpEvent>
 #include <QKeyEvent>
 #include <QMenu>
@@ -42,6 +43,9 @@ constexpr qreal textPaddingY = 9;
 constexpr qreal textPortTop = 21;
 constexpr qreal maxTextWidth = 480;
 constexpr double initialRecordingSpan = 1.0;
+constexpr qreal controlTop = 51;
+constexpr qreal controlButtonHeight = 28;
+constexpr qreal controlRowGap = 7;
 
 QFont displayFont()
 {
@@ -58,6 +62,8 @@ qreal lowestPort(qsizetype inputs, qsizetype outputs)
 
 QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameters, QSizeF customSize = {})
 {
+    if (definition.id == "control")
+        return {234, controlTop + controlCommands(parameters).size() / 2 * (controlButtonHeight + controlRowGap) + 25};
     if (definition.resizable()) {
         if (customSize.isValid())
             return customSize;
@@ -73,6 +79,8 @@ QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameter
 
 QColor portColor(DataType type, const ThemeColors &colors, const QString &id)
 {
+    if (type == DataType::Control)
+        return colors.control;
     if (type == DataType::WaveformChannel && channelPortIndex(id) >= 0)
         return waveformChannelColor(channelPortIndex(id), colors);
     if (type == DataType::Any || type == DataType::Waveform)
@@ -112,6 +120,8 @@ public:
         }
         applySettings(node);
         setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
+        if (!consoleCommands.isEmpty())
+            setAcceptHoverEvents(true);
         setToolTip(resizable() ? definition.description + " 拖动右下角可调整大小。" : definition.description);
         setPos(node.position);
     }
@@ -179,6 +189,8 @@ public:
         for (qsizetype index = 0; index < list.size(); ++index) {
             if (list.at(index).id == id) {
                 qreal y = (definition.displaysText ? textPortTop : portTop) + portSpacing * index;
+                if (output && !consoleCommands.isEmpty())
+                    y = 20;
                 if (output && recording)
                     y = id == waveformViewportPort ? 20 : portTop + portSpacing * channelPortIndex(id);
                 return {output ? dimensions.width() : 0, y};
@@ -253,6 +265,8 @@ public:
             paintWaveform(*painter, recordingChart(), recordingFrame, recordingLayout, colors, recordingHover);
         else if (definition.displaysSpectrum)
             paintSpectrum(*painter, recordingChart(), spectrum, colors);
+        else if (!consoleCommands.isEmpty())
+            paintControlConsole(*painter);
         else if (!definition.displaysText) {
             painter->setPen(failed ? colors.error : colors.muted);
             const QString label = shownStatus.isEmpty() ? (definition.manualOpen ? QString("串口已关闭") : QString("等待输入")) : shownStatus;
@@ -272,6 +286,11 @@ public:
         const auto nextPorts = modulePorts(definition, node.parameters, false);
         const auto nextOutputs = modulePorts(definition, node.parameters, true);
         const auto nextSize = cardSize(definition, node.parameters, node.customSize);
+        if (definition.id == "control") {
+            consoleCommands = controlCommands(node.parameters);
+            setHoveredControl({});
+            pressedControl.reset();
+        }
         const bool changed = nextPorts != inputPorts || nextOutputs != outputPorts;
         if (changed) {
             prepareGeometryChange();
@@ -351,6 +370,7 @@ public:
     bool failed = false;
     std::function<void(QPointF)> moved;
     std::function<void(bool)> recordingFollowChanged;
+    std::function<void(ControlCommand)> controlActivated;
 
     qint64 recordingSamples() const { return recording ? recording->sampleCount() : 0; }
     bool recordingFollowing() const { return recording && followLatest; }
@@ -450,6 +470,71 @@ public:
     }
 
 protected:
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *event) override
+    {
+        setHoveredControl(controlAt(event->pos()));
+        QGraphicsItem::hoverMoveEvent(event);
+    }
+
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent *event) override
+    {
+        setHoveredControl({});
+        QGraphicsItem::hoverLeaveEvent(event);
+    }
+
+    void mousePressEvent(QGraphicsSceneMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            if (const auto command = controlAt(event->pos())) {
+                if (!isSelected()) {
+                    scene()->clearSelection();
+                    setSelected(true);
+                }
+                pressedControl = command;
+                setHoveredControl(command);
+                update();
+                event->accept();
+                return;
+            }
+        }
+        QGraphicsItem::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *event) override
+    {
+        if (pressedControl) {
+            setHoveredControl(controlAt(event->pos()));
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton && pressedControl) {
+            const auto command = *pressedControl;
+            pressedControl.reset();
+            setHoveredControl(controlAt(event->pos()));
+            update();
+            if (hoveredControl == command && controlActivated)
+                controlActivated(command);
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseReleaseEvent(event);
+    }
+
+    bool sceneEvent(QEvent *event) override
+    {
+        if (event->type() == QEvent::UngrabMouse && pressedControl) {
+            pressedControl.reset();
+            setHoveredControl({});
+            update();
+        }
+        return QGraphicsItem::sceneEvent(event);
+    }
+
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override
     {
         if (change == ItemPositionChange) {
@@ -465,6 +550,61 @@ protected:
     }
 
 private:
+    QRectF controlButton(qsizetype index) const
+    {
+        constexpr qreal margin = 14;
+        constexpr qreal columnGap = 8;
+        const qreal width = (dimensions.width() - 2 * margin - columnGap) / 2;
+        return {margin + (index % 2) * (width + columnGap), controlTop + (index / 2) * (controlButtonHeight + controlRowGap),
+                width, controlButtonHeight};
+    }
+
+    std::optional<ControlCommand> controlAt(QPointF position) const
+    {
+        if (consoleCommands.isEmpty())
+            return std::nullopt;
+        const auto views = scene()->views();
+        if (!views.isEmpty() && views.first()->transform().m11() < 0.12)
+            return std::nullopt;
+        for (qsizetype index = 0; index < consoleCommands.size(); ++index) {
+            if (controlButton(index).contains(position))
+                return consoleCommands.at(index);
+        }
+        return std::nullopt;
+    }
+
+    void setHoveredControl(std::optional<ControlCommand> command)
+    {
+        if (hoveredControl == command)
+            return;
+        hoveredControl = command;
+        if (command)
+            setCursor(Qt::PointingHandCursor);
+        else
+            unsetCursor();
+        update();
+    }
+
+    void paintControlConsole(QPainter &painter) const
+    {
+        for (qsizetype index = 0; index < consoleCommands.size(); ++index) {
+            const ControlCommand command = consoleCommands.at(index);
+            const QRectF button = controlButton(index);
+            const bool primary = command == ControlCommand::Start;
+            const bool hovered = hoveredControl == command;
+            const QColor fill = primary ? (hovered ? colors.accentHover : colors.accent)
+                : (hovered && pressedControl == command ? colors.selection : hovered ? colors.hover : colors.surface);
+            painter.setPen(QPen(primary ? fill : colors.border, 1));
+            painter.setBrush(fill);
+            painter.drawRoundedRect(button, 6, 6);
+            painter.setPen(primary ? colors.onAccent : colors.text);
+            painter.drawText(button, Qt::AlignCenter, controlCommandLabel(command));
+        }
+        painter.setPen(colors.muted);
+        painter.drawText(QRectF(14, dimensions.height() - 23, dimensions.width() - 28, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                         shownStatus.isEmpty() ? QString("等待操作") : shownStatus);
+    }
+
     bool resizable() const { return definition.resizable(); }
 
     qreal chartLeft() const
@@ -621,6 +761,9 @@ private:
     const ThemeColors &colors;
     QList<PortDefinition> inputPorts;
     QList<PortDefinition> outputPorts;
+    QList<ControlCommand> consoleCommands;
+    std::optional<ControlCommand> hoveredControl;
+    std::optional<ControlCommand> pressedControl;
     QSizeF dimensions;
     std::unique_ptr<ScopeCapture> capture;
     std::unique_ptr<WaveformRecording> recording;
@@ -826,6 +969,8 @@ void Canvas::addNodeItem(const Node &node)
     auto *item = new NodeItem(node, colors);
     if (item->definition.recordsWaveform)
         item->recordingFollowChanged = [this, id = node.id](bool following) { Q_EMIT recordingFollowChanged(id, following); };
+    if (item->definition.id == "control")
+        item->controlActivated = [this, id = node.id](ControlCommand command) { Q_EMIT controlActivated(id, command); };
     item->moved = [this, id = node.id](QPointF position) {
         graph.moveNode(id, position);
         updateEdges(id);

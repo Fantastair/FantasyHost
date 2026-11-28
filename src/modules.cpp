@@ -275,6 +275,27 @@ private:
     bool reportedData = false;
 };
 
+class ControlConsole final : public Module {
+public:
+    explicit ControlConsole(ModuleCallbacks callbacks) : Module(std::move(callbacks)) {}
+
+    bool triggerControl(ControlCommand command) override
+    {
+        if (!controlCommands(parameters).contains(command))
+            return false;
+        io.publish(controlPort, command);
+        io.report(QString("已发送 %1").arg(controlCommandLabel(command)));
+        return true;
+    }
+
+private:
+    void parametersChanged(const QJsonObject &previous) override
+    {
+        if (previous.isEmpty())
+            io.report("等待操作");
+    }
+};
+
 QList<PortDefinition> scopeInputs(const QJsonObject &parameters)
 {
     if (parameters.value("layout").toString() == "frame")
@@ -347,10 +368,32 @@ int channelPortIndex(const QString &id)
     return channel >= 0 && channel < maxScopeChannels ? channel : -1;
 }
 
+QList<ControlCommand> controlCommands(const QJsonObject &parameters)
+{
+    if (parameters.value("controlMode") == "extended")
+        return {ControlCommand::Start, ControlCommand::Pause, ControlCommand::Resume, ControlCommand::Stop};
+    return {ControlCommand::Start, ControlCommand::Stop};
+}
+
+QString controlCommandLabel(ControlCommand command)
+{
+    switch (command) {
+    case ControlCommand::Start: return "启动";
+    case ControlCommand::Pause: return "暂停";
+    case ControlCommand::Resume: return "继续";
+    case ControlCommand::Stop: return "停止";
+    }
+    return {};
+}
+
 const QList<ModuleDefinition> &moduleDefinitions()
 {
     static const QList<ParameterChoice> serialFormats{{"text", "文本 (UTF-8)"}, {"hex", "HEX（二进制）"}};
     static const QList<ModuleDefinition> definitions{
+        {"control", "启停控制台", "通过连线向模块发送采集控制信号。", {}, {{controlPort, "控制", DataType::Control}}, {
+            choice("controlMode", "控制模式", "basic", {{"basic", "启动 / 停止"},
+                {"extended", "启动 / 暂停 / 继续 / 停止"}}, true),
+        }, &create<ControlConsole>},
         {"serial", "串口收发", "向串口发送字节，并将收到的字节输出到画布。",
          {{"in", "发送", DataType::Bytes}}, {{"out", "接收", DataType::Bytes}}, {
             {"port", "串口", ParameterKind::SerialPort, QString(), 0, 0, 0, false, false, {}},

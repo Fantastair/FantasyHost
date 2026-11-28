@@ -12,14 +12,14 @@ const ThemeColors &themeColors(bool dark)
         QColor("#afbdd0"), QColor("#1d293b"), QColor("#4f6076"), QColor("#6d7d91"),
         QColor("#2855b5"), QColor("#ffffff"), QColor("#21489d"), QColor("#eaf0f8"),
         QColor("#e4edff"), QColor("#177971"), QColor("#92530d"), QColor("#b23541"),
-        QColor("#f1f6fa"), QColor(28, 49, 78, 18),
+        QColor("#f1f6fa"), QColor(28, 49, 78, 18), QColor("#6c4aa6"),
     };
     static const ThemeColors darkColors{
         QColor("#1c2532"), QColor("#131c28"), QColor("#232f40"), QColor("#38485d"),
         QColor("#42536b"), QColor("#e8eff9"), QColor("#afbed2"), QColor("#91a2b9"),
         QColor("#a0bfff"), QColor("#142749"), QColor("#b7ccff"), QColor("#2a384b"),
         QColor("#2c4061"), QColor("#75d6cb"), QColor("#eec188"), QColor("#ffabb1"),
-        QColor("#172333"), QColor(0, 0, 0, 54),
+        QColor("#172333"), QColor(0, 0, 0, 54), QColor("#c6a8f2"),
     };
     return dark ? darkColors : light;
 }
@@ -94,6 +94,9 @@ QString workspaceStyle(const ThemeColors &colors)
         QToolBar#projectToolbar QToolButton:focus, QWidget#dockHeader QToolButton:focus,
         QPushButton:focus, QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid @accent; }
         QPushButton { background: @card; border-color: @border; padding: 5px 9px; min-height: 19px; }
+        QPushButton#consoleStart { background: @accent; color: @onAccent; border-color: @accent; }
+        QPushButton#consoleStart:hover { background: @accentHover; }
+        QPushButton#consoleStart:focus { border-color: @onAccent; }
         QPushButton#followRecording:checked { background: @selection; color: @accent; border-color: @accent; }
         QPushButton#followRecording:checked:hover { color: @accentHover; border-color: @accentHover; }
         QPushButton#serialToggle[portOpen="false"], QPushButton#applyTextTemplate:enabled { background: @accent; color: @onAccent; border-color: @accent; }
@@ -235,6 +238,10 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
         break;
     case WorkspaceIcon::Filter:
         polyline({{3, 4}, {15, 4}, {11, 9}, {11, 13}, {7, 15}, {7, 9}, {3, 4}});
+        break;
+    case WorkspaceIcon::Control:
+        polyline({{3, 5}, {8, 9}, {3, 13}, {3, 5}});
+        p.drawRect(QRectF(11, 6.5, 5, 5));
         break;
     case WorkspaceIcon::Text:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);

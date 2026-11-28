@@ -24,6 +24,7 @@ public:
     bool hasWaveformReceivers(const QUuid &id) const;
     void publishWaveform(const QUuid &id, const WaveformPacket &packet);
     bool sendManual(const QUuid &id, const QString &text, QString &error);
+    bool triggerControl(const QUuid &id, ControlCommand command);
     QString status(const QUuid &id) const { return statuses.value(id); }
 
 Q_SIGNALS:

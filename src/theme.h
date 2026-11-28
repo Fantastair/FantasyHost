@@ -23,11 +23,12 @@ struct ThemeColors {
     QColor error;
     QColor plot;
     QColor shadow;
+    QColor control;
 };
 
 enum class WorkspaceIcon {
     New, Open, Save, Fit, Float, Close, Minimize, Maximize, Restore,
-    Serial, Waveform, Recorder, Spectrum, Filter, Text,
+    Serial, Waveform, Recorder, Spectrum, Filter, Text, Control,
 };
 
 const ThemeColors &themeColors(bool dark);

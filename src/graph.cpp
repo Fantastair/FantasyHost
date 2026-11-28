@@ -136,6 +136,8 @@ QString Graph::connectionError(const Endpoint &from, const Endpoint &to, bool re
     const bool scalarInput = input->type == DataType::Any && (output->type == DataType::Bytes || output->type == DataType::Number);
     const bool singleToBundle = input->type == DataType::Waveform && output->type == DataType::WaveformChannel;
     if (output->type != input->type && !scalarInput && !singleToBundle) {
+        if (input->type == DataType::Control || output->type == DataType::Control)
+            return "控制信号需要连接控制输出与控制输入。";
         if (input->type == DataType::Waveform)
             return "该输入只接受「视口波形」：请接到波形记录器的视口波形输出或前一个滤波器的输出。";
         if (output->type == DataType::Waveform)
