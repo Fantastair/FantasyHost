@@ -44,8 +44,8 @@ constexpr qreal textPortTop = 21;
 constexpr qreal maxTextWidth = 480;
 constexpr double initialRecordingSpan = 1.0;
 constexpr qreal controlTop = 51;
-constexpr qreal controlButtonHeight = 28;
-constexpr qreal controlRowGap = 7;
+constexpr qreal controlButtonSize = 34;
+constexpr qreal controlButtonGap = 8;
 
 QFont displayFont()
 {
@@ -63,7 +63,7 @@ qreal lowestPort(qsizetype inputs, qsizetype outputs)
 QSizeF cardSize(const ModuleDefinition &definition, const QJsonObject &parameters, QSizeF customSize = {})
 {
     if (definition.id == "control")
-        return {234, controlTop + controlCommands(parameters).size() / 2 * (controlButtonHeight + controlRowGap) + 25};
+        return {210, controlTop + controlButtonSize + 13};
     if (definition.resizable()) {
         if (customSize.isValid())
             return customSize;
@@ -120,8 +120,10 @@ public:
         }
         applySettings(node);
         setFlags(ItemIsMovable | ItemIsSelectable | ItemSendsGeometryChanges);
-        if (!consoleCommands.isEmpty())
+        if (isConsole()) {
             setAcceptHoverEvents(true);
+            setFlag(ItemIsFocusable);
+        }
         setToolTip(resizable() ? definition.description + " 拖动右下角可调整大小。" : definition.description);
         setPos(node.position);
     }
@@ -189,7 +191,7 @@ public:
         for (qsizetype index = 0; index < list.size(); ++index) {
             if (list.at(index).id == id) {
                 qreal y = (definition.displaysText ? textPortTop : portTop) + portSpacing * index;
-                if (output && !consoleCommands.isEmpty())
+                if (output && isConsole())
                     y = 20;
                 if (output && recording)
                     y = id == waveformViewportPort ? 20 : portTop + portSpacing * channelPortIndex(id);
@@ -265,7 +267,7 @@ public:
             paintWaveform(*painter, recordingChart(), recordingFrame, recordingLayout, colors, recordingHover);
         else if (definition.displaysSpectrum)
             paintSpectrum(*painter, recordingChart(), spectrum, colors);
-        else if (!consoleCommands.isEmpty())
+        else if (isConsole())
             paintControlConsole(*painter);
         else if (!definition.displaysText) {
             painter->setPen(failed ? colors.error : colors.muted);
@@ -286,10 +288,11 @@ public:
         const auto nextPorts = modulePorts(definition, node.parameters, false);
         const auto nextOutputs = modulePorts(definition, node.parameters, true);
         const auto nextSize = cardSize(definition, node.parameters, node.customSize);
-        if (definition.id == "control") {
-            consoleCommands = controlCommands(node.parameters);
+        if (isConsole()) {
+            consoleHasPause = hasPauseControl(node.parameters);
             setHoveredControl({});
             pressedControl.reset();
+            keyboardControl.reset();
         }
         const bool changed = nextPorts != inputPorts || nextOutputs != outputPorts;
         if (changed) {
@@ -350,6 +353,24 @@ public:
     void setDisplayText(const QString &text) { pendingText = text; }
     void setSpectrum(const SpectrumFrame &frame) { spectrum = frame; update(); }
 
+    void setControlState(ControlState state)
+    {
+        consoleState = state;
+        if (keyboardControl == ControlAction::PauseResume && !controlCommandFor(*keyboardControl, state))
+            keyboardControl = ControlAction::RunStop;
+        update();
+    }
+
+    QString controlToolTip(QPointF position) const
+    {
+        if (const auto action = controlAt(position)) {
+            if (const auto command = controlCommandFor(*action, consoleState))
+                return controlCommandLabel(*command);
+            return "启动后可暂停";
+        }
+        return {};
+    }
+
     void presentValues()
     {
         shownStatus = pendingStatus;
@@ -370,7 +391,7 @@ public:
     bool failed = false;
     std::function<void(QPointF)> moved;
     std::function<void(bool)> recordingFollowChanged;
-    std::function<void(ControlCommand)> controlActivated;
+    std::function<void(ControlAction)> controlActivated;
 
     qint64 recordingSamples() const { return recording ? recording->sampleCount() : 0; }
     bool recordingFollowing() const { return recording && followLatest; }
@@ -485,13 +506,15 @@ protected:
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override
     {
         if (event->button() == Qt::LeftButton) {
-            if (const auto command = controlAt(event->pos())) {
+            if (const auto action = controlAt(event->pos())) {
                 if (!isSelected()) {
                     scene()->clearSelection();
                     setSelected(true);
                 }
-                pressedControl = command;
-                setHoveredControl(command);
+                setFocus(Qt::MouseFocusReason);
+                keyboardControl.reset();
+                pressedControl = action;
+                setHoveredControl(action);
                 update();
                 event->accept();
                 return;
@@ -513,16 +536,46 @@ protected:
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override
     {
         if (event->button() == Qt::LeftButton && pressedControl) {
-            const auto command = *pressedControl;
+            const auto action = *pressedControl;
             pressedControl.reset();
             setHoveredControl(controlAt(event->pos()));
             update();
-            if (hoveredControl == command && controlActivated)
-                controlActivated(command);
+            if (hoveredControl == action && controlCommandFor(action, consoleState) && controlActivated)
+                controlActivated(action);
             event->accept();
             return;
         }
         QGraphicsItem::mouseReleaseEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (isConsole() && (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
+            keyboardControl = event->key() == Qt::Key_Right && consoleHasPause
+                && controlCommandFor(ControlAction::PauseResume, consoleState) ? ControlAction::PauseResume : ControlAction::RunStop;
+            update();
+            event->accept();
+            return;
+        }
+        if (isConsole() && (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return)) {
+            const auto action = keyboardControl.value_or(ControlAction::RunStop);
+            keyboardControl = action;
+            update();
+            if (!event->isAutoRepeat() && controlCommandFor(action, consoleState) && controlActivated)
+                controlActivated(action);
+            event->accept();
+            return;
+        }
+        QGraphicsItem::keyPressEvent(event);
+    }
+
+    void focusOutEvent(QFocusEvent *event) override
+    {
+        if (keyboardControl) {
+            keyboardControl.reset();
+            update();
+        }
+        QGraphicsItem::focusOutEvent(event);
     }
 
     bool sceneEvent(QEvent *event) override
@@ -550,35 +603,35 @@ protected:
     }
 
 private:
-    QRectF controlButton(qsizetype index) const
+    bool isConsole() const { return definition.id == "control"; }
+
+    QRectF controlButton(ControlAction action) const
     {
         constexpr qreal margin = 14;
-        constexpr qreal columnGap = 8;
-        const qreal width = (dimensions.width() - 2 * margin - columnGap) / 2;
-        return {margin + (index % 2) * (width + columnGap), controlTop + (index / 2) * (controlButtonHeight + controlRowGap),
-                width, controlButtonHeight};
+        const qreal left = margin + (action == ControlAction::PauseResume ? controlButtonSize + controlButtonGap : 0);
+        return {left, controlTop, controlButtonSize, controlButtonSize};
     }
 
-    std::optional<ControlCommand> controlAt(QPointF position) const
+    std::optional<ControlAction> controlAt(QPointF position) const
     {
-        if (consoleCommands.isEmpty())
+        if (!isConsole())
             return std::nullopt;
         const auto views = scene()->views();
         if (!views.isEmpty() && views.first()->transform().m11() < 0.12)
             return std::nullopt;
-        for (qsizetype index = 0; index < consoleCommands.size(); ++index) {
-            if (controlButton(index).contains(position))
-                return consoleCommands.at(index);
-        }
+        if (controlButton(ControlAction::RunStop).contains(position))
+            return ControlAction::RunStop;
+        if (consoleHasPause && controlButton(ControlAction::PauseResume).contains(position))
+            return ControlAction::PauseResume;
         return std::nullopt;
     }
 
-    void setHoveredControl(std::optional<ControlCommand> command)
+    void setHoveredControl(std::optional<ControlAction> action)
     {
-        if (hoveredControl == command)
+        if (hoveredControl == action)
             return;
-        hoveredControl = command;
-        if (command)
+        hoveredControl = action;
+        if (action && controlCommandFor(*action, consoleState))
             setCursor(Qt::PointingHandCursor);
         else
             unsetCursor();
@@ -587,22 +640,28 @@ private:
 
     void paintControlConsole(QPainter &painter) const
     {
-        for (qsizetype index = 0; index < consoleCommands.size(); ++index) {
-            const ControlCommand command = consoleCommands.at(index);
-            const QRectF button = controlButton(index);
-            const bool primary = command == ControlCommand::Start;
-            const bool hovered = hoveredControl == command;
+        for (ControlAction action : {ControlAction::RunStop, ControlAction::PauseResume}) {
+            const bool primary = action == ControlAction::RunStop;
+            if (!primary && !consoleHasPause)
+                break;
+            const auto command = controlCommandFor(action, consoleState);
+            const QRectF button = controlButton(action);
+            const bool hovered = command && hoveredControl == action;
             const QColor fill = primary ? (hovered ? colors.accentHover : colors.accent)
-                : (hovered && pressedControl == command ? colors.selection : hovered ? colors.hover : colors.surface);
-            painter.setPen(QPen(primary ? fill : colors.border, 1));
+                : (hovered && pressedControl == action ? colors.selection : hovered ? colors.hover : colors.surface);
+            painter.setPen(QPen(keyboardControl == action && hasFocus() ? colors.text : primary ? fill : colors.border, 1));
             painter.setBrush(fill);
             painter.drawRoundedRect(button, 6, 6);
-            painter.setPen(primary ? colors.onAccent : colors.text);
-            painter.drawText(button, Qt::AlignCenter, controlCommandLabel(command));
+            const WorkspaceIcon icon = command == ControlCommand::Stop ? WorkspaceIcon::Stop
+                : (!command || command == ControlCommand::Pause ? WorkspaceIcon::Pause : WorkspaceIcon::Play);
+            const QColor foreground = !command ? colors.disabled : primary ? colors.onAccent : colors.text;
+            paintWorkspaceIcon(painter, icon, QRectF(button.center() - QPointF(10, 10), QSizeF(20, 20)), foreground);
         }
+        const QRectF last = controlButton(consoleHasPause ? ControlAction::PauseResume : ControlAction::RunStop);
+        const qreal left = last.right() + 13;
         painter.setPen(colors.muted);
-        painter.drawText(QRectF(14, dimensions.height() - 23, dimensions.width() - 28, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                         shownStatus.isEmpty() ? QString("等待操作") : shownStatus);
+        painter.drawText(QRectF(left, last.top(), dimensions.width() - left - 14, last.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, controlStateLabel(consoleState));
     }
 
     bool resizable() const { return definition.resizable(); }
@@ -761,9 +820,11 @@ private:
     const ThemeColors &colors;
     QList<PortDefinition> inputPorts;
     QList<PortDefinition> outputPorts;
-    QList<ControlCommand> consoleCommands;
-    std::optional<ControlCommand> hoveredControl;
-    std::optional<ControlCommand> pressedControl;
+    ControlState consoleState = ControlState::Stopped;
+    bool consoleHasPause = false;
+    std::optional<ControlAction> hoveredControl;
+    std::optional<ControlAction> pressedControl;
+    std::optional<ControlAction> keyboardControl;
     QSizeF dimensions;
     std::unique_ptr<ScopeCapture> capture;
     std::unique_ptr<WaveformRecording> recording;
@@ -970,7 +1031,7 @@ void Canvas::addNodeItem(const Node &node)
     if (item->definition.recordsWaveform)
         item->recordingFollowChanged = [this, id = node.id](bool following) { Q_EMIT recordingFollowChanged(id, following); };
     if (item->definition.id == "control")
-        item->controlActivated = [this, id = node.id](ControlCommand command) { Q_EMIT controlActivated(id, command); };
+        item->controlActivated = [this, id = node.id](ControlAction action) { Q_EMIT controlActivated(id, action); };
     item->moved = [this, id = node.id](QPointF position) {
         graph.moveNode(id, position);
         updateEdges(id);
@@ -1112,6 +1173,12 @@ void Canvas::setNodeSpectrum(const QUuid &id, const SpectrumFrame &frame)
 {
     if (NodeItem *item = nodes.value(id); item && item->definition.displaysSpectrum)
         item->setSpectrum(frame);
+}
+
+void Canvas::setControlState(const QUuid &id, ControlState state)
+{
+    if (NodeItem *item = nodes.value(id); item && item->definition.id == "control")
+        item->setControlState(state);
 }
 
 QString Canvas::nodeDisplayText(const QUuid &id) const
@@ -1296,6 +1363,13 @@ bool Canvas::viewportEvent(QEvent *event)
                     QToolTip::showText(help->globalPos(), port->label, viewport());
                     return true;
                 }
+            }
+        }
+        if (const auto *node = qgraphicsitem_cast<NodeItem *>(itemAt(help->pos()))) {
+            const QString label = node->controlToolTip(node->mapFromScene(mapToScene(help->pos())));
+            if (!label.isEmpty()) {
+                QToolTip::showText(help->globalPos(), label, viewport());
+                return true;
             }
         }
     }

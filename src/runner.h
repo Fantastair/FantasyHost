@@ -25,6 +25,7 @@ public:
     void publishWaveform(const QUuid &id, const WaveformPacket &packet);
     bool sendManual(const QUuid &id, const QString &text, QString &error);
     bool triggerControl(const QUuid &id, ControlCommand command);
+    void activateControl(const QUuid &id, ControlAction action);
     QString status(const QUuid &id) const { return statuses.value(id); }
 
 Q_SIGNALS:
@@ -33,6 +34,7 @@ Q_SIGNALS:
     void textReceived(const QUuid &id, const QString &text);
     void spectrumReceived(const QUuid &id, const SpectrumFrame &frame);
     void waveformRequested(const QUuid &id);
+    void controlStateChanged(const QUuid &id, ControlState state);
     void statusChanged(const QUuid &id, const QString &status);
     void failed(const QUuid &id, const QString &message);
 

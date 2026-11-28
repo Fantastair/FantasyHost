@@ -279,12 +279,28 @@ class ControlConsole final : public Module {
 public:
     explicit ControlConsole(ModuleCallbacks callbacks) : Module(std::move(callbacks)) {}
 
+    ControlState controlState() const override { return state; }
+
     bool triggerControl(ControlCommand command) override
     {
-        if (!controlCommands(parameters).contains(command))
+        const bool primary = controlCommandFor(ControlAction::RunStop, state) == command;
+        const bool secondary = hasPauseControl(parameters) && controlCommandFor(ControlAction::PauseResume, state) == command;
+        if (!primary && !secondary)
             return false;
+        switch (command) {
+        case ControlCommand::Start:
+        case ControlCommand::Resume:
+            state = ControlState::Running;
+            break;
+        case ControlCommand::Pause:
+            state = ControlState::Paused;
+            break;
+        case ControlCommand::Stop:
+            state = ControlState::Stopped;
+            break;
+        }
         io.publish(controlPort, command);
-        io.report(QString("已发送 %1").arg(controlCommandLabel(command)));
+        io.report(controlStateLabel(state));
         return true;
     }
 
@@ -292,8 +308,10 @@ private:
     void parametersChanged(const QJsonObject &previous) override
     {
         if (previous.isEmpty())
-            io.report("等待操作");
+            io.report(controlStateLabel(state));
     }
+
+    ControlState state = ControlState::Stopped;
 };
 
 QList<PortDefinition> scopeInputs(const QJsonObject &parameters)
@@ -368,11 +386,18 @@ int channelPortIndex(const QString &id)
     return channel >= 0 && channel < maxScopeChannels ? channel : -1;
 }
 
-QList<ControlCommand> controlCommands(const QJsonObject &parameters)
+bool hasPauseControl(const QJsonObject &parameters)
 {
-    if (parameters.value("controlMode") == "extended")
-        return {ControlCommand::Start, ControlCommand::Pause, ControlCommand::Resume, ControlCommand::Stop};
-    return {ControlCommand::Start, ControlCommand::Stop};
+    return parameters.value("controlMode") == "extended";
+}
+
+std::optional<ControlCommand> controlCommandFor(ControlAction action, ControlState state)
+{
+    if (action == ControlAction::RunStop)
+        return state == ControlState::Stopped ? ControlCommand::Start : ControlCommand::Stop;
+    if (state == ControlState::Stopped)
+        return std::nullopt;
+    return state == ControlState::Running ? ControlCommand::Pause : ControlCommand::Resume;
 }
 
 QString controlCommandLabel(ControlCommand command)
@@ -382,6 +407,16 @@ QString controlCommandLabel(ControlCommand command)
     case ControlCommand::Pause: return "暂停";
     case ControlCommand::Resume: return "继续";
     case ControlCommand::Stop: return "停止";
+    }
+    return {};
+}
+
+QString controlStateLabel(ControlState state)
+{
+    switch (state) {
+    case ControlState::Stopped: return "已停止";
+    case ControlState::Running: return "运行中";
+    case ControlState::Paused: return "已暂停";
     }
     return {};
 }

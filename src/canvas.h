@@ -29,6 +29,7 @@ public:
     void setNodeStatus(const QUuid &id, const QString &status);
     void setNodeDisplayText(const QUuid &id, const QString &text);
     void setNodeSpectrum(const QUuid &id, const SpectrumFrame &frame);
+    void setControlState(const QUuid &id, ControlState state);
     QString nodeDisplayText(const QUuid &id) const;
     void sample(const QUuid &id, int channel, const QList<double> &values);
     void updateNodeSettings(const Node &node, const QList<QUuid> &removedEdges);
@@ -58,7 +59,7 @@ Q_SIGNALS:
     void recordingUpdated(const QUuid &id, qint64 samples);
     void recordingFollowChanged(const QUuid &id, bool following);
     void recordingViewportChanged(const QUuid &id);
-    void controlActivated(const QUuid &id, ControlCommand command);
+    void controlActivated(const QUuid &id, ControlAction action);
 #ifdef FANTASYHOST_OPENGL
     void openGLViewportChanged(bool enabled);
 #endif

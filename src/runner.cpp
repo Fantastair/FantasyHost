@@ -179,8 +179,19 @@ bool GraphRunner::sendManual(const QUuid &id, const QString &text, QString &erro
 bool GraphRunner::triggerControl(const QUuid &id, ControlCommand command)
 {
     const auto entry = modules.find(id);
-    return entry != modules.end() && entry->second.active && !entry->second.closing
-        && entry->second.module->triggerControl(command);
+    if (entry == modules.end() || !entry->second.active || entry->second.closing || !entry->second.module->triggerControl(command))
+        return false;
+    Q_EMIT controlStateChanged(id, entry->second.module->controlState());
+    return true;
+}
+
+void GraphRunner::activateControl(const QUuid &id, ControlAction action)
+{
+    const auto entry = modules.find(id);
+    if (entry != modules.end()) {
+        if (const auto command = controlCommandFor(action, entry->second.module->controlState()))
+            triggerControl(id, *command);
+    }
 }
 
 void GraphRunner::publish(const QUuid &id, const QString &output, const Packet &packet)

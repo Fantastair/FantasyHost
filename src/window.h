@@ -52,7 +52,6 @@ private:
     void refreshInspector();
     void createSerialControls(QWidget *pane, const Node &node);
     void createScopeControls(QWidget *pane, const QUuid &id);
-    void createConsoleControls(QWidget *pane, const Node &node);
     void createRecorderControls(QWidget *pane, const QUuid &id);
     void exportRecording(const QUuid &id, bool image);
     QWidget *createTextTemplateEditor(QWidget *parent, const Node &node, const ParameterDefinition &parameter);

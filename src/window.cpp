@@ -16,7 +16,6 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QFormLayout>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIntValidator>
 #include <QLabel>
@@ -269,9 +268,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(canvas, &Canvas::graphChanged, this, &MainWindow::markModified);
     connect(canvas, &Canvas::topologyChanged, this, [this] { runner.sync(graph); });
-    connect(canvas, &Canvas::controlActivated, this, [this](const QUuid &id, ControlCommand command) {
-        runner.triggerControl(id, command);
-    });
+    connect(canvas, &Canvas::controlActivated, &runner, &GraphRunner::activateControl);
+    connect(&runner, &GraphRunner::controlStateChanged, canvas, &Canvas::setControlState);
     connect(canvas, &Canvas::selectionChanged, this, &MainWindow::refreshInspector);
     connect(canvas, &Canvas::message, this, [this](const QString &text) { statusBar()->showMessage(text, 4500); });
     connect(canvas, &Canvas::zoomChanged, this, [this](double percent) {
@@ -696,8 +694,6 @@ void MainWindow::refreshInspector()
         createRecorderControls(pane, id);
     else if (definition.id == "serial")
         createSerialControls(pane, *node);
-    else if (definition.id == "control")
-        createConsoleControls(pane, *node);
 
     auto *formPane = new QWidget(pane);
     auto *form = new QFormLayout(formPane);
@@ -923,23 +919,6 @@ void MainWindow::createSerialControls(QWidget *pane, const Node &node)
     refreshSerialPreview();
 }
 
-void MainWindow::createConsoleControls(QWidget *pane, const Node &node)
-{
-    auto *section = new QWidget(pane);
-    auto *layout = new QGridLayout(section);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(7);
-    const auto commands = controlCommands(node.parameters);
-    for (int index = 0; index < commands.size(); ++index) {
-        const ControlCommand command = commands.at(index);
-        auto *button = new QPushButton(controlCommandLabel(command), section);
-        button->setObjectName(command == ControlCommand::Start ? "consoleStart" : "consoleAction");
-        connect(button, &QPushButton::clicked, this, [this, id = node.id, command] { runner.triggerControl(id, command); });
-        layout->addWidget(button, index / 2, index % 2);
-    }
-    inspectorLayout->addWidget(section);
-}
-
 void MainWindow::createScopeControls(QWidget *pane, const QUuid &id)
 {
     auto *section = new QWidget(pane);
@@ -1140,8 +1119,7 @@ void MainWindow::setParameter(const QUuid &id, const QString &parameter, const Q
     if (parameter == "rxFormat" || parameter == "txFormat")
         refreshSerialPreview();
     const bool changesInspectorFields = ((node.type == "spectrum" || node.type == "filter") && parameter == "inputLayout")
-        || (node.type == "filter" && parameter == "filterMode")
-        || (node.type == "control" && parameter == "controlMode");
+        || (node.type == "filter" && parameter == "filterMode");
     if (inspectedNode == id && changesInspectorFields)
         QTimer::singleShot(0, this, [this, id] { if (id == inspectedNode) refreshInspector(); });
     if (!removed.isEmpty()) {

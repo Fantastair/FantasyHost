@@ -94,9 +94,6 @@ QString workspaceStyle(const ThemeColors &colors)
         QToolBar#projectToolbar QToolButton:focus, QWidget#dockHeader QToolButton:focus,
         QPushButton:focus, QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid @accent; }
         QPushButton { background: @card; border-color: @border; padding: 5px 9px; min-height: 19px; }
-        QPushButton#consoleStart { background: @accent; color: @onAccent; border-color: @accent; }
-        QPushButton#consoleStart:hover { background: @accentHover; }
-        QPushButton#consoleStart:focus { border-color: @onAccent; }
         QPushButton#followRecording:checked { background: @selection; color: @accent; border-color: @accent; }
         QPushButton#followRecording:checked:hover { color: @accentHover; border-color: @accentHover; }
         QPushButton#serialToggle[portOpen="false"], QPushButton#applyTextTemplate:enabled { background: @accent; color: @onAccent; border-color: @accent; }
@@ -243,6 +240,22 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
         polyline({{3, 5}, {8, 9}, {3, 13}, {3, 5}});
         p.drawRect(QRectF(11, 6.5, 5, 5));
         break;
+    case WorkspaceIcon::Play:
+        p.setBrush(p.pen().color());
+        p.setPen(Qt::NoPen);
+        p.drawPolygon(QPolygonF{{5.5, 3.5}, {14.5, 9}, {5.5, 14.5}});
+        break;
+    case WorkspaceIcon::Pause:
+        p.setBrush(p.pen().color());
+        p.setPen(Qt::NoPen);
+        p.drawRoundedRect(QRectF(4.5, 3.5, 3.2, 11), 0.7, 0.7);
+        p.drawRoundedRect(QRectF(10.3, 3.5, 3.2, 11), 0.7, 0.7);
+        break;
+    case WorkspaceIcon::Stop:
+        p.setBrush(p.pen().color());
+        p.setPen(Qt::NoPen);
+        p.drawRoundedRect(QRectF(4, 4, 10, 10), 1, 1);
+        break;
     case WorkspaceIcon::Text:
         p.drawRoundedRect(QRectF(2, 3, 14, 12), 2, 2);
         p.drawLine(QPointF(5, 7), QPointF(13, 7));
@@ -250,6 +263,17 @@ void drawIcon(QPainter &p, WorkspaceIcon symbol)
         break;
     }
 }
+}
+
+void paintWorkspaceIcon(QPainter &painter, WorkspaceIcon symbol, const QRectF &rect, const QColor &color)
+{
+    painter.save();
+    painter.translate(rect.topLeft());
+    painter.scale(rect.width() / 18, rect.height() / 18);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.45, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    drawIcon(painter, symbol);
+    painter.restore();
 }
 
 QIcon workspaceIcon(WorkspaceIcon symbol, const QColor &color)
@@ -260,9 +284,7 @@ QIcon workspaceIcon(WorkspaceIcon symbol, const QColor &color)
         pixmap.setDevicePixelRatio(scale);
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(color, 1.45, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        drawIcon(painter, symbol);
+        paintWorkspaceIcon(painter, symbol, QRectF(0, 0, 18, 18), color);
         painter.end();
         icon.addPixmap(pixmap);
     }

@@ -4,6 +4,9 @@
 #include <QIcon>
 #include <QPalette>
 
+class QPainter;
+class QRectF;
+
 struct ThemeColors {
     QColor surface;         // Toolbars and side panels
     QColor canvas;
@@ -28,10 +31,11 @@ struct ThemeColors {
 
 enum class WorkspaceIcon {
     New, Open, Save, Fit, Float, Close, Minimize, Maximize, Restore,
-    Serial, Waveform, Recorder, Spectrum, Filter, Text, Control,
+    Serial, Waveform, Recorder, Spectrum, Filter, Text, Control, Play, Pause, Stop,
 };
 
 const ThemeColors &themeColors(bool dark);
 QPalette themePalette(const ThemeColors &colors);
 QString workspaceStyle(const ThemeColors &colors);
 QIcon workspaceIcon(WorkspaceIcon symbol, const QColor &color);
+void paintWorkspaceIcon(QPainter &painter, WorkspaceIcon symbol, const QRectF &rect, const QColor &color);
